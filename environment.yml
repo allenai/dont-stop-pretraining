@@ -1,0 +1,10 @@
+name: domains
+channels:
+  - defaults
+dependencies:
+  - python=3.7
+  - pip
+
+  - pip:
+      - git+git://github.com/allenai/allennlp@master
+
