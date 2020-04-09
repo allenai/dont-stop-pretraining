@@ -91,7 +91,7 @@ def main():
 
 
     os.environ['EVALUATE_ON_TEST'] = str(int(args.evaluate_on_test))
-    os.environ['TRAIN_SAMPLE'] = str(int(args.train_throttle))
+    os.environ['TRAIN_THROTTLE'] = str(int(args.train_throttle))
     os.environ['LAZY'] = str(int(args.lazy))
     os.environ['JACKKNIFE'] = str(int(args.jackknife))
     os.environ['SKIP_EARLY_STOPPING'] = str(int(args.skip_early_stopping))
@@ -101,7 +101,7 @@ def main():
             "allennlp",
             "train",
             "--include-package",
-            "supermask_bert",
+            "dont_stop_pretraining",
             args.config,
             "-s",
             str(args.serialization_dir)

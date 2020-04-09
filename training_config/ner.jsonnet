@@ -53,14 +53,16 @@ local PRETRAINED_ROBERTA_FIELDS(TRAINABLE) = {
   "indexer": {
     "tokens": {
         "type": "pretrained_transformer_mismatched",
-        "model_name": "roberta-base"
+        "model_name": "roberta-base",
+        "max_length": 512
     }
   },
   "embedder": {
     "token_embedders": {
       "tokens":{
         "type": "pretrained_transformer_mismatched",
-        "model_name": MODEL_NAME
+        "model_name": MODEL_NAME,
+        "max_length": 512
       }
     }
   },

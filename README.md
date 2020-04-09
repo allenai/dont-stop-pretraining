@@ -24,8 +24,8 @@ The following command will train a RoBERTa classifier on the AG corpus. Check `s
 python -m scripts.train \
         --config training_config/classifier.jsonnet \
         --serialization_dir model_logs/ag_base \
-        --hyperparameters ROBERTA \
-        --dataset hatespeech \
+        --hyperparameters ROBERTA_CLASSIFIER \
+        --dataset ag \
         --device 0 \
         --override \
         --evaluate_on_test

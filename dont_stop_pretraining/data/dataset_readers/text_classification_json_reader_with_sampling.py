@@ -130,8 +130,9 @@ class TextClassificationJsonReaderWithSampling(TextClassificationJsonReader):
                 items = json.loads(line)
                 text = items["text"]
                 label = str(items.get('label'))
-                instance = self.text_to_instance(text=text, label=label)
-                yield instance
+                if text:
+                    instance = self.text_to_instance(text=text, label=label)
+                    yield instance
 
     @overrides
     def text_to_instance(self, text: str, label: str = None) -> Instance:  # type: ignore
