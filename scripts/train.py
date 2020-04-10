@@ -110,7 +110,7 @@ def main():
     for seed in args.seed:
         os.environ['SEED'] = str(seed)  
         if args.jackknife:
-            for ext in range(0, 100):
+            for ext in range(0, 4):
                 allennlp_command[-1] = str(args.serialization_dir) + "_" + str(seed)
                 os.environ['JACKKNIFE_EXT'] = str(ext)
                 allennlp_command[-1] = allennlp_command[-1] + "_" + str(ext)
