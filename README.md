@@ -8,6 +8,12 @@ Code associated with the Don't Stop Pretraining ACL 2020 paper
 conda env create -f environment.yml
 ```
 
+## Replicating paper results
+
+If you would like to replicate our paper's results more closely, we recommend using the `pinned-allennlp` branch, which uses thee exact (but outdated) allennlp version that we evaluated on for the paper results.
+
+The master branch of this repository is the updated to use the latest allennlp version, so specific performance of models may differ from what we report in paper.
+
 ## Example commands
 
 ### Run basic RoBERTa model

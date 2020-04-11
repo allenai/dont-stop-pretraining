@@ -1,34 +1,19 @@
-NER_DATASETS = {
-    "ncbi": {
-        "data_dir": "/home/suching/scibert/data/ner/NCBI-disease/",
-    },
-    "sciie": {
-        "data_dir": "/home/suching/scibert/data/ner/sciie/"
-    },
-    "jnlpba": {
-        "data_dir": "/home/suching/scibert/data/ner/JNLPBA/"
-    },
-    "bc5cdr": {
-        "data_dir": "/home/suching/scibert/data/ner/bc5cdr/"
-    }
-}
 
-
-CLASSIFICATION_DATASETS = {
+DATASETS = {
     "hatespeech": {
         "data_dir": "s3://suching-dev/textcat/twitter/hatespeech/",
     },
     "ag": {
-        "data_dir": "s3://suching-dev/textcat/news/ag/"
+        "data_dir": "s3://suching-dev/textcat/news/ag/",
     },
     "scicite": {
         "data_dir": "s3://suching-dev/textcat/science/sci-cite/",
     },
     "citation_intent": {
-        "data_dir": "s3://suching-dev/textcat/science/citation_intent/"
+        "data_dir": "s3://suching-dev/textcat/science/citation_intent/",
     },
     "chemprot": {
-        "data_dir": "s3://suching-dev/textcat/science/chemprot/"
+        "data_dir": "s3://suching-dev/textcat/science/chemprot/",
     },
     "sciie": {
         "data_dir": "s3://suching-dev/textcat/science/sciie/",
@@ -58,12 +43,9 @@ CLASSIFICATION_DATASETS = {
         "data_dir": "s3://suching-dev/textcat/twitter/semeval_2018_task3_irony_detection/task_b/",
     },
     "rct-20k": {
-        "data_dir": "s3://suching-dev/textcat/science/rct-20k/",
+        "data_dir": "s3://suching-dev/textcat/science/rct-sample/",
     },
     "cs-abstruct": {
         "data_dir": "s3://suching-dev/textcat/science/csabstruct-reformat/",
     }
 }
-
-
-DATASETS = {"NER": NER_DATASETS, "CLASSIFICATION": CLASSIFICATION_DATASETS}

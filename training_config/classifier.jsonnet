@@ -23,14 +23,17 @@ local TRAIN_THROTTLE = std.parseInt(std.extVar("TRAIN_THROTTLE"));
 local GRAD_ACC = std.parseInt(std.extVar("GRAD_ACC_BATCH_SIZE"));
 // skip early stopping? turning this on will prevent dev eval at each epoch.
 local SKIP_EARLY_STOPPING = std.parseInt(std.extVar("SKIP_EARLY_STOPPING")) == 1;
-local SKIP_TRAINING = std.parseInt(std.extVar("SKIP_TRAINING")) == 1;
 // are we jackknifing? only for hyperpartisan.
 local JACKKNIFE = std.parseInt(std.extVar("JACKKNIFE")) == 1;
 // jacknife file extension. only for hyperpartisan.
 local JACKKNIFE_EXT = std.extVar("JACKKNIFE_EXT");
 // embedding to use
 local EMBEDDING = std.extVar("EMBEDDING");
-// early stopping patience
+// feedforward width multiplier
+local FEEDFORWARD_WIDTH_MULTIPLIER = std.parseInt(std.extVar("FEEDFORWARD_WIDTH_MULTIPLIER"));
+// number of feedforward layers
+local NUM_FEEDFORWARD_LAYERS = std.parseInt(std.extVar("NUM_FEEDFORWARD_LAYERS"));
+
 
 local TRAIN_DATA_PATH = if JACKKNIFE then DATA_DIR + "jackknife/" + "train." + JACKKNIFE_EXT else DATA_DIR  + "train.jsonl";
 local DEV_DATA_PATH = if JACKKNIFE then DATA_DIR + "jackknife/" + "dev." + JACKKNIFE_EXT else DATA_DIR  + "dev.jsonl";
@@ -116,7 +119,6 @@ local CHECKPOINTER = {
     "num_serialized_models_to_keep": 0
 };
 
-
 {
     "numpy_seed": SEED,
     "pytorch_seed": SEED,
@@ -145,8 +147,8 @@ local CHECKPOINTER = {
         "seq2vec_encoder": CLS_FIELDS(ROBERTA_EMBEDDING_DIM),
         "feedforward_layer": {
             "input_dim": ENCODER_OUTPUT_DIM,
-            "hidden_dims": ROBERTA_EMBEDDING_DIM,
-            "num_layers": 1,
+            "hidden_dims": ROBERTA_EMBEDDING_DIM * FEEDFORWARD_WIDTH_MULTIPLIER,
+            "num_layers": NUM_FEEDFORWARD_LAYERS,
             "activations": "tanh"
         },
         "dropout": DROPOUT
