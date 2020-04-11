@@ -20,7 +20,7 @@ local BATCH_SIZE = std.parseInt(std.extVar("BATCH_SIZE"));
 // will sample this amount of training data, if set
 local TRAIN_THROTTLE = std.parseInt(std.extVar("TRAIN_THROTTLE"));
 // gradient accumulation batch size
-local GRAD_ACC = std.parseInt(std.extVar("NUM_GRAD_ACC_STEPS"));
+local GRAD_ACC = std.parseInt(std.extVar("GRAD_ACC_BATCH_SIZE"));
 // skip early stopping? turning this on will prevent dev eval at each epoch.
 local SKIP_EARLY_STOPPING = std.parseInt(std.extVar("SKIP_EARLY_STOPPING")) == 1;
 local SKIP_TRAINING = std.parseInt(std.extVar("SKIP_TRAINING")) == 1;
@@ -30,12 +30,7 @@ local JACKKNIFE = std.parseInt(std.extVar("JACKKNIFE")) == 1;
 local JACKKNIFE_EXT = std.extVar("JACKKNIFE_EXT");
 // embedding to use
 local EMBEDDING = std.extVar("EMBEDDING");
-// width multiplier on hidden size of feedforward network
-local FEEDFORWARD_WIDTH_MULTIPLIER = std.parseInt(std.extVar("FEEDFORWARD_WIDTH_MULTIPLIER"));
-// number of feedforward layers
-local NUM_FEEDFORWARD_LAYERS = std.parseInt(std.extVar("NUM_FEEDFORWARD_LAYERS"));
 // early stopping patience
-local PATIENCE = std.parseInt(std.extVar("PATIENCE"));
 
 local TRAIN_DATA_PATH = if JACKKNIFE then DATA_DIR + "jackknife/" + "train." + JACKKNIFE_EXT else DATA_DIR  + "train.jsonl";
 local DEV_DATA_PATH = if JACKKNIFE then DATA_DIR + "jackknife/" + "dev." + JACKKNIFE_EXT else DATA_DIR  + "dev.jsonl";
@@ -47,45 +42,59 @@ local TEST_DATA_PATH = if JACKKNIFE then DATA_DIR + "jackknife/" + "dev." + JACK
 
 local PRETRAINED_ROBERTA_FIELDS(TRAINABLE) = {
   "indexer": {
-    "tokens": {
+    "roberta": {
         "type": "pretrained_transformer",
-        "model_name": "roberta-base",
-        "max_length": 512
+        "model_name": MODEL_NAME,
+        "do_lowercase": false
     }
   },
   "embedder": {
-    "token_embedders": {
-      "tokens":{
+    "roberta": {
         "type": "pretrained_transformer",
-        "model_name": MODEL_NAME,
-        "max_length": 512
-      }
+        "model_name": MODEL_NAME
     }
   },
   "tokenizer": {
     "type": "pretrained_transformer",
-    "model_name": "roberta-base",
-    "max_length": 512
+    "model_name": MODEL_NAME,
+    "do_lowercase": false,
+    "start_tokens": ["<s>"],
+    "end_tokens": ["</s>"]
     },
-    
   "optimizer": {
-        "type": "huggingface_adamw_str_lr",
-        "lr": LEARNING_RATE,
-        "betas": [0.9, 0.98],
-        "eps": 1e-6,
-         "weight_decay": 0.1,
-         "parameter_groups": [
-         [["bias", "LayerNorm.bias", "LayerNorm.weight", "layer_norm.weight"], {"weight_decay": 0.0}, []],
-     ]
-  },
+    "type": "bert_adam",
+    "b1": 0.9,
+    "b2": 0.98,
+    "e": 1e-06,
+    "lr": "2e-05",
+    "max_grad_norm": 1,
+    "parameter_groups": [
+        [
+            [
+                "bias",
+                "LayerNorm.bias",
+                "LayerNorm.weight",
+                "layer_norm.weight"
+            ],
+            {
+                "weight_decay": 0
+            },
+            []
+        ]
+    ],
+    "schedule": "warmup_linear",
+    "t_total": -1,
+    "warmup": 0.06,
+    "weight_decay": 0.1
+   },
   "scheduler": {
       "type": "slanted_triangular",
       "cut_frac": 0.06
     },
   "checkpointer": {
-    "type": "roberta_default",
+    "type": "fine-tuning",
     "num_epochs": NUM_EPOCHS,
-    "skip_early_stopping": SKIP_EARLY_STOPPING
+    "num_serialized_models_to_keep": 0
   },
   "embedding_dim": 768
 };
@@ -100,6 +109,13 @@ local ROBERTA_TRAINABLE = true;
 
 local ROBERTA_EMBEDDING_DIM = PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['embedding_dim'];
 local ENCODER_OUTPUT_DIM = PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['embedding_dim'];
+
+local CHECKPOINTER = {
+    "type": "fine-tuning",
+    "num_epochs": NUM_EPOCHS,
+    "num_serialized_models_to_keep": 0
+};
+
 
 {
     "numpy_seed": SEED,
@@ -129,28 +145,30 @@ local ENCODER_OUTPUT_DIM = PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['embeddi
         "seq2vec_encoder": CLS_FIELDS(ROBERTA_EMBEDDING_DIM),
         "feedforward_layer": {
             "input_dim": ENCODER_OUTPUT_DIM,
-            "hidden_dims": ROBERTA_EMBEDDING_DIM * FEEDFORWARD_WIDTH_MULTIPLIER,
-            "num_layers": NUM_FEEDFORWARD_LAYERS,
+            "hidden_dims": ROBERTA_EMBEDDING_DIM,
+            "num_layers": 1,
             "activations": "tanh"
         },
         "dropout": DROPOUT
     },
-    "data_loader": {
-        "batch_sampler": {
-            "type": "bucket",
-            "batch_size": BATCH_SIZE
-        }
+    "iterator": {
+        "type": "bucket",
+        "sorting_keys": [["tokens", "num_tokens"]],
+        "batch_size": BATCH_SIZE
+    },
+    "validation_iterator": {
+        "type": "bucket",
+        "sorting_keys": [["tokens", "num_tokens"]],
+        "batch_size": 64
     },
     "trainer": {
         "num_epochs": NUM_EPOCHS,
-        "patience": PATIENCE,
+        "patience": 3,
         "cuda_device": std.parseInt(std.extVar("CUDA_DEVICE")),
         "validation_metric": "+f1",
-        "checkpointer": PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['checkpointer'],
         "optimizer": PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['optimizer'],
-        "num_gradient_accumulation_steps": GRAD_ACC,
-        "learning_rate_scheduler": PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['scheduler']
-    } + if SKIP_TRAINING then {"type": "no_op"} else {}
+        "gradient_accumulation_batch_size": GRAD_ACC
+    } + if SKIP_EARLY_STOPPING then {"checkpointer": CHECKPOINTER} else {"num_serialized_models_to_keep": 0}
 }
 
 

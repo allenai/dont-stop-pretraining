@@ -106,8 +106,8 @@ else
     srun -w $server -p allennlp_hipri --gpus=1 python -m scripts.train \
         --config ./training_config/classifier.jsonnet \
         --serialization_dir ./model_logs/${name_prefix}_${task}_${dataset}_149959    \
-        --model roberta-base \
-        --hyperparameters ROBERTA_CLASSIFIER \
+        --model $model \
+        --hyperparameters $hp \
         --dataset $dataset \
         --device 0 \
         --override \

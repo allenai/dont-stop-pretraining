@@ -1,11 +1,9 @@
-from typing import Dict, Optional, List, Union
+from typing import Dict, Optional
 
 from overrides import overrides
 import torch
-import numpy as np
 
-
-from allennlp.data import Vocabulary, TextFieldTensors
+from allennlp.data import Vocabulary
 from allennlp.models.model import Model
 from allennlp.modules import Seq2SeqEncoder, Seq2VecEncoder, TextFieldEmbedder, FeedForward
 from allennlp.nn import InitializerApplicator, RegularizerApplicator
@@ -56,19 +54,15 @@ class BasicClassifierWithF1(Model):
         seq2vec_encoder: Seq2VecEncoder,
         feedforward_layer: FeedForward,
         seq2seq_encoder: Seq2SeqEncoder = None,
-        dropout: Union[str, float] = None,
+        dropout: float = None,
         num_labels: int = None,
         label_namespace: str = "labels",
         initializer: InitializerApplicator = InitializerApplicator(),
         regularizer: Optional[RegularizerApplicator] = None,
-        track_weights: bool = False,
-        disable_layers: List[str] = []
     ) -> None:
 
         super().__init__(vocab, regularizer)
         self._text_field_embedder = text_field_embedder
-        self._track_weights = track_weights
-
 
         if seq2seq_encoder:
             self._seq2seq_encoder = seq2seq_encoder
@@ -76,9 +70,10 @@ class BasicClassifierWithF1(Model):
             self._seq2seq_encoder = None
 
         self._seq2vec_encoder = seq2vec_encoder
+        self._classifier_input_dim = self._seq2vec_encoder.get_output_dim()
 
         if dropout:
-            self._dropout = torch.nn.Dropout(float(dropout))
+            self._dropout = torch.nn.Dropout(dropout)
         else:
             self._dropout = None
 
@@ -89,41 +84,16 @@ class BasicClassifierWithF1(Model):
         else:
             self._num_labels = vocab.get_vocab_size(namespace=self._label_namespace)
         self._feedforward_layer = feedforward_layer
-        self._classifier_input_dim = self._feedforward_layer.get_output_dim()
-
         self._classification_layer = torch.nn.Linear(self._classifier_input_dim, self._num_labels)
         self._accuracy = CategoricalAccuracy()
         self._label_f1_metrics: Dict[str, F1Measure] = {}
         for i in range(self._num_labels):
             self._label_f1_metrics[vocab.get_token_from_index(index=i, namespace="labels")] = F1Measure(positive_label=i)
         self._loss = torch.nn.CrossEntropyLoss()
-        self._initial_params = {}
         initializer(self)
-        for name, param in self.named_parameters():
-            self._initial_params[name] = param.detach().clone()
-
-        if "ff" in disable_layers:
-            for name, param in self.named_parameters():
-                if "intermediate.dense" in name or "output.dense" in name and "attention" not in name:
-                    param.requires_grad = False
-
-        if "attention" in disable_layers:
-            for name, param in self.named_parameters():
-                if "attention" in name:
-                    param.requires_grad = False
-
-        if "layer_norm" in disable_layers:
-            for name, param in self.named_parameters():
-                if "LayerNorm" in name:
-                    param.requires_grad = False
-
-        if "embedding" in disable_layers:
-            for name, param in self.named_parameters():
-                if "embedding" in name:
-                    param.requires_grad = False
 
     def forward(  # type: ignore
-        self, tokens: TextFieldTensors, label: torch.IntTensor = None
+        self, tokens: Dict[str, torch.LongTensor], label: torch.IntTensor = None
     ) -> Dict[str, torch.Tensor]:
 
         """
@@ -168,7 +138,6 @@ class BasicClassifierWithF1(Model):
         if label is not None:
             loss = self._loss(logits, label.long().view(-1))
             output_dict["loss"] = loss
-            output_dict['probs'] = probs
             for i in range(self._num_labels):
                 metric = self._label_f1_metrics[self.vocab.get_token_from_index(index=i, namespace="labels")]
                 metric(probs, label)
@@ -176,9 +145,26 @@ class BasicClassifierWithF1(Model):
 
         return output_dict
 
-    def compute_l2_distance(self, X, Y):
-        return torch.dist(X.to(Y), Y, 2).item()
-
+    @overrides
+    def decode(self, output_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Does a simple argmax over the probabilities, converts index to string label, and
+        add ``"label"`` key to the dictionary with the result.
+        """
+        predictions = output_dict["probs"]
+        if predictions.dim() == 2:
+            predictions_list = [predictions[i] for i in range(predictions.shape[0])]
+        else:
+            predictions_list = [predictions]
+        classes = []
+        for prediction in predictions_list:
+            label_idx = prediction.argmax(dim=-1).item()
+            label_str = self.vocab.get_index_to_token_vocabulary(self._label_namespace).get(
+                label_idx, str(label_idx)
+            )
+            classes.append(label_str)
+        output_dict["label"] = classes
+        return output_dict
 
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         metric_dict = {}
@@ -186,9 +172,6 @@ class BasicClassifierWithF1(Model):
         for name, metric in self._label_f1_metrics.items():
             metric_val = metric.get_metric(reset)
             sum_f1 += metric_val[2]
-        if self._track_weights:
-            for name, parameter in self.named_parameters():
-                metric_dict[name + "_l2_distance"] = self.compute_l2_distance(self._initial_params[name], parameter)
         names = list(self._label_f1_metrics.keys())
         total_len = len(names)
         average_f1 = sum_f1 / total_len
