@@ -8,12 +8,6 @@ Code associated with the Don't Stop Pretraining ACL 2020 paper
 conda env create -f environment.yml
 ```
 
-## Replicating paper results
-
-If you would like to replicate our paper's results more closely, we recommend using the `pinned-allennlp` branch, which uses thee exact (but outdated) allennlp version that we evaluated on for the paper results.
-
-The master branch of this repository is the updated to use the latest allennlp version, so specific performance of models may differ from what we report in paper.
-
 ## Example commands
 
 ### Run basic RoBERTa model
@@ -27,12 +21,12 @@ bash scripts/download.sh
 The following command will train a RoBERTa classifier on the Citation Intent corpus. Check `scripts/train.py` for other dataset names and tasks you can pass to the `--dataset` flag.
 
 ```
-python -m scripts.train \
+srun -w allennlp-server1 --gpus=1 -p allennlp_hipri python -m scripts.train \
         --config training_config/classifier.jsonnet \
         --serialization_dir model_logs/citation_intent_base \
         --hyperparameters ROBERTA_CLASSIFIER \
         --dataset citation_intent \
-        --model roberta-base \
+        --model cs_roberta_base \
         --device 0 \
         --evaluate_on_test
 ```

@@ -23,6 +23,9 @@ local TRAIN_THROTTLE = std.parseInt(std.extVar("TRAIN_THROTTLE"));
 local GRAD_ACC = std.parseInt(std.extVar("GRAD_ACC_BATCH_SIZE"));
 // skip early stopping? turning this on will prevent dev eval at each epoch.
 local SKIP_EARLY_STOPPING = std.parseInt(std.extVar("SKIP_EARLY_STOPPING")) == 1;
+local LR_SCHEDULE = std.parseInt(std.extVar("LR_SCHEDULE")) == 1;
+
+
 // are we jackknifing? only for hyperpartisan.
 local JACKKNIFE = std.parseInt(std.extVar("JACKKNIFE")) == 1;
 // jacknife file extension. only for hyperpartisan.
@@ -86,7 +89,7 @@ local PRETRAINED_ROBERTA_FIELDS(TRAINABLE) = {
         ]
     ],
     "schedule": "warmup_linear",
-    "t_total": -1,
+    "t_total": if LR_SCHEDULE then (DATASET_SIZE / GRAD_ACC) * NUM_EPOCHS else -1,
     "warmup": 0.06,
     "weight_decay": 0.1
    },
@@ -169,7 +172,7 @@ local CHECKPOINTER = {
         "cuda_device": std.parseInt(std.extVar("CUDA_DEVICE")),
         "validation_metric": "+f1",
         "optimizer": PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['optimizer'],
-        "gradient_accumulation_batch_size": GRAD_ACC
+        "gradient_accumulation_batch_size": GRAD_ACC,
     } + if SKIP_EARLY_STOPPING then {"checkpointer": CHECKPOINTER} else {"num_serialized_models_to_keep": 0}
 }
 

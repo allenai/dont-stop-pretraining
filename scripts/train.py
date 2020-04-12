@@ -86,6 +86,7 @@ def main():
 
     os.environ['MODEL_NAME'] = str(args.model)
     os.environ['DATA_DIR'] = DATASETS[args.dataset]['data_dir']
+    os.environ['DATASET_SIZE'] = str(DATASETS[args.dataset]['dataset_size'])
 
     for key, val in environment.items():
         os.environ[key]  = str(val)

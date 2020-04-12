@@ -9,7 +9,7 @@ if [[ $big == 1 ]];
 then
     hp="ROBERTA_CLASSIFIER_BIG"
 else
-    hp="ROBERTA_CLASSIFIER"
+    hp="ROBERTA_CLASSIFIER_SMALL"
 fi
 
 
