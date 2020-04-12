@@ -24,29 +24,31 @@ We have stored all the task data in `s3://allennlp/datasets/`. You can download 
 bash scripts/download.sh
 ```
 
-The following command will train a RoBERTa classifier on the AG corpus. Check `scripts/train.py` for other dataset names and tasks you can pass to the `--dataset` flag.
+The following command will train a RoBERTa classifier on the Citation Intent corpus. Check `scripts/train.py` for other dataset names and tasks you can pass to the `--dataset` flag.
 
 ```
 python -m scripts.train \
         --config training_config/classifier.jsonnet \
-        --serialization_dir model_logs/ag_base \
+        --serialization_dir model_logs/citation_intent_base \
         --hyperparameters ROBERTA_CLASSIFIER \
-        --dataset ag \
+        --dataset citation_intent \
+        --model roberta-base \
         --device 0 \
-        --override \
         --evaluate_on_test
 ```
+
+You can supply other huggingface-compatible models to the dataset, by providing a path to the model:
 
 The following command will train a RoBERTa tagger on the NCBI corpus. 
 
 ```
 python -m scripts.train \
-        --config ./training_config/ner.jsonnet \
-        --serialization_dir ./model_logs/base_ncbi \
-        --hyperparameters ROBERTA_TAGGER \
-        --dataset ncbi \
+        --config training_config/classifier.jsonnet \
+        --serialization_dir model_logs/citation_intent_base \
+        --hyperparameters ROBERTA_CLASSIFIER \
+        --dataset citation_intent \
+        --model /path/to/cs-roberta \
         --device 0 \
-        --override \
         --evaluate_on_test
 ```
 
