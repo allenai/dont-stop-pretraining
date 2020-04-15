@@ -7,6 +7,8 @@ local EVALUATE_ON_TEST = std.parseInt(std.extVar("EVALUATE_ON_TEST")) == 1;
 local DATASET_SIZE = std.parseInt(std.extVar("DATASET_SIZE"));
 // learning rate
 local LEARNING_RATE = std.extVar("LEARNING_RATE");
+// validation metric
+local VALIDATION_METRIC = std.extVar("VALIDATION_METRIC");
 // dropout
 local DROPOUT = std.extVar("DROPOUT");
 // seed
@@ -72,7 +74,7 @@ local PRETRAINED_ROBERTA_FIELDS(TRAINABLE) = {
     "b1": 0.9,
     "b2": 0.98,
     "e": 1e-06,
-    "lr": "2e-05",
+    "lr": LEARNING_RATE,
     "max_grad_norm": 1,
     "parameter_groups": [
         [
@@ -170,7 +172,7 @@ local CHECKPOINTER = {
         "num_epochs": NUM_EPOCHS,
         "patience": 3,
         "cuda_device": std.parseInt(std.extVar("CUDA_DEVICE")),
-        "validation_metric": "+f1",
+        "validation_metric": VALIDATION_METRIC,
         "optimizer": PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['optimizer'],
         "gradient_accumulation_batch_size": GRAD_ACC,
     } + if SKIP_EARLY_STOPPING then {"checkpointer": CHECKPOINTER} else {"num_serialized_models_to_keep": 0}

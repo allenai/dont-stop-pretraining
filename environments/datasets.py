@@ -8,6 +8,10 @@ DATASETS = {
         "data_dir": "s3://suching-dev/textcat/science/rct-20k/",
         "dataset_size": 180040
     },
+    "rct-sample": {
+        "data_dir": "s3://suching-dev/textcat/science/rct-sample/",
+        "dataset_size": 500
+    },
     "citation_intent": {
         "data_dir": "s3://suching-dev/textcat/science/citation_intent/",
         "dataset_size": 1688

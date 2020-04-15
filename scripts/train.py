@@ -55,6 +55,12 @@ def main():
     parser.add_argument('--dataset',
                         type=str,
                         help="dataset to run on. see environments/dataset.py for dataset names.")
+    parser.add_argument('--perf',
+                        required=False,
+                        choices=['+f1', '+accuracy'],
+                        default='+f1',
+                        type=str,
+                        help="validation metric")
     parser.add_argument('-m',
                         '--model',
                         type=Path,
@@ -81,7 +87,7 @@ def main():
     environment = HYPERPARAMETERS[args.hyperparameters.upper()]
 
     if not DATASETS.get(args.dataset):
-        raise ValueError(f"{args.dataset} not a valid dataset for this config. choose from the following available datasets: {list(DATASETS[dataset_type].keys())}")
+        raise ValueError(f"{args.dataset} not a valid dataset for this config. choose from the following available datasets: {list(DATASETS[args.dataset].keys())}")
     os.environ['DATASET'] = args.dataset
 
     os.environ['MODEL_NAME'] = str(args.model)
@@ -100,6 +106,7 @@ def main():
     os.environ['LAZY'] = str(int(args.lazy))
     os.environ['JACKKNIFE'] = str(int(args.jackknife))
     os.environ['SKIP_EARLY_STOPPING'] = str(int(args.skip_early_stopping))
+    os.environ['VALIDATION_METRIC'] = str(args.perf)
 
     allennlp_command = [
             "allennlp",
