@@ -1,24 +1,5 @@
-NER_DATASETS = {
-    "ncbi": {
-        "data_dir": "/home/suching/scibert/data/ner/NCBI-disease/",
-        "dataset_size": 5424
-    },
-    "sciie": {
-        "data_dir": "/home/suching/scibert/data/ner/sciie/",
-        "dataset_size": 2211
-    },
-    "jnlpba": {
-        "data_dir": "/home/suching/scibert/data/ner/JNLPBA/",
-        "dataset_size": 18607
-    },
-    "bc5cdr": {
-        "data_dir": "/home/suching/scibert/data/ner/bc5cdr/",
-        "dataset_size": 4942
-    }
-}
 
-
-CLASSIFICATION_DATASETS = {
+DATASETS = {
     "chemprot": {
         "data_dir": "s3://suching-dev/textcat/science/chemprot/",
         "dataset_size": 4169
@@ -56,6 +37,3 @@ CLASSIFICATION_DATASETS = {
         "dataset_size": 115251
     }
 }
-
-
-DATASETS = {"NER": NER_DATASETS, "CLASSIFICATION": CLASSIFICATION_DATASETS}

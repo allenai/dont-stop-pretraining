@@ -6,22 +6,16 @@ name_prefix=$5
 perf=$6
 server=$7
 
-if [[ $task == 1 ]];
-then
-    task_type="CLASSIFIER"
-else
-    task_type="NER"
-fi
 
 
 if [[ $big == 1 ]];
 then
-    hp="ROBERTA_${task_type}_BIG"
+    hp="ROBERTA_CLASSIFIER_BIG"
 elif [[ $big == 2 ]];
 then
-    hp="ROBERTA_${task_type}_MINI"
+    hp="ROBERTA_CLASSIFIER_MINI"
 else
-    hp="ROBERTA_${task_type}_SMALL"
+    hp="ROBERTA_CLASSIFIER_SMALL"
 fi
 
 srun -w $server -p allennlp_hipri --gpus=1 python -m scripts.train \
