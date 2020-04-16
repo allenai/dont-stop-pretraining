@@ -21,6 +21,8 @@ local BATCH_SIZE = std.parseInt(std.extVar("BATCH_SIZE"));
 local TRAIN_THROTTLE = std.parseInt(std.extVar("TRAIN_THROTTLE"));
 // gradient accumulation batch size
 local GRAD_ACC = std.parseInt(std.extVar("NUM_GRAD_ACC_STEPS"));
+local LR_SCHEDULE = std.parseInt(std.extVar("LR_SCHEDULE")) == 1;
+
 // skip early stopping? turning this on will prevent dev eval at each epoch.
 local SKIP_EARLY_STOPPING = std.parseInt(std.extVar("SKIP_EARLY_STOPPING")) == 1;
 local SKIP_TRAINING = std.parseInt(std.extVar("SKIP_TRAINING")) == 1;
@@ -148,9 +150,9 @@ local ENCODER_OUTPUT_DIM = PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['embeddi
         "validation_metric": "+f1",
         "checkpointer": PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['checkpointer'],
         "optimizer": PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['optimizer'],
-        "num_gradient_accumulation_steps": GRAD_ACC,
-        "learning_rate_scheduler": PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['scheduler']
+        "num_gradient_accumulation_steps": GRAD_ACC
     } + if SKIP_TRAINING then {"type": "no_op"} else {}
+      + if LR_SCHEDULE then {"learning_rate_scheduler": PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['scheduler']} else {}
 }
 
 
