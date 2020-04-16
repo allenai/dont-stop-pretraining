@@ -4,81 +4,27 @@ dataset=$3
 big=$4
 name_prefix=$5
 perf=$6
-server=$7
+task_type=$7
+server=$8
 
-if [[ $big == 1 ]];
+if [[ $task == 1 ]];
 then
-    hp="ROBERTA_CLASSIFIER_BIG"
-elif [[ $big == 2 ]];
-then
-    hp="ROBERTA_CLASSIFIER_MINI"
+    task_type="CLASSIFIER"
 else
-    hp="ROBERTA_CLASSIFIER_SMALL"
+    task_type="NER"
 fi
 
 
-# if [[ $dataset == "hyperpartisan_news" ]];
-# then
-#     srun -w allennlp-server1 -p allennlp_hipri --gpus=1 python -m scripts.train \
-#         --config ./training_config/classifier.jsonnet \
-#         --serialization_dir ./model_logs/test_20389 \
-#         --model /net/nfs.corp/allennlp/suching/acl_2020_models/hyperpartisan_news/roberta-oracle-tapt \
-#         --hyperparameters ROBERTA_CLASSIFIER_SMALL \
-#         --perf +f1 \
-#         --dataset hyperpartisan_news \
-#         --device 0 \
-#         --override \
-#         --jackknife \
-#         --seed 20389
+if [[ $big == 1 ]];
+then
+    hp="ROBERTA_${task_type}_BIG"
+elif [[ $big == 2 ]];
+then
+    hp="ROBERTA_${task_type}_MINI"
+else
+    hp="ROBERTA_${task_type}_SMALL"
+fi
 
-#     srun -w $server -p allennlp_hipri --gpus=1 python -m scripts.train \
-#         --config ./training_config/$task.jsonnet \
-#         --serialization_dir ./model_logs/${name_prefix}_${task}_${dataset}_605265    \
-#         --model $model \
-#         --hyperparameters $hp \
-#         --perf $perf \
-#         --dataset $dataset \
-#         --device 0 \
-#         --override \
-#         --jackknife \
-#         --seed 605265
-
-#     srun -w $server -p allennlp_hipri --gpus=1 python -m scripts.train \
-#         --config ./training_config/$task.jsonnet \
-#         --serialization_dir ./model_logs/${name_prefix}_${task}_${dataset}_279507   \
-#         --model $model \
-#         --hyperparameters $hp \
-#         --perf $perf \
-#         --dataset $dataset \
-#         --device 0 \
-#         --override \
-#         --jackknife \
-#         --seed 279507
-
-#     srun -w $server -p allennlp_hipri --gpus=1 python -m scripts.train \
-#         --config ./training_config/$task.jsonnet \
-#         --serialization_dir ./model_logs/${name_prefix}_${task}_${dataset}_149959    \
-#         --model $model \
-#         --hyperparameters $hp \
-#         --perf $perf \
-#         --dataset $dataset \
-#         --device 0 \
-#         --override \
-#         --jackknife \
-#         --seed 149959
-
-#     srun -w $server -p allennlp_hipri --gpus=1 python -m scripts.train \
-#         --config ./training_config/$task.jsonnet \
-#         --serialization_dir ./model_logs/${name_prefix}_${task}_${dataset}_212131    \
-#         --model $model \
-#         --hyperparameters $hp \
-#         --perf $perf \
-#         --dataset $dataset \
-#         --device 0 \
-#         --override \
-#         --jackknife \
-#         --seed 212131
-# else
 srun -w $server -p allennlp_hipri --gpus=1 python -m scripts.train \
     --config ./training_config/$task.jsonnet \
     --serialization_dir ./model_logs/${name_prefix}_${task}_${dataset}_20389    \
@@ -138,18 +84,3 @@ srun -w $server -p allennlp_hipri --gpus=1 python -m scripts.train \
     --override \
     --evaluate_on_test \
     --seed 212131
-
-
-
-
-# srun -w allennlp-server4 -p allennlp_hipri --gpus=1 python -m scripts.train \
-#         --config ./training_config/classifier.jsonnet \
-#         --serialization_dir ./model_logs/tapt_classifer_new    \
-#         --model /net/nfs.corp/allennlp/suching/acl_2020_models/rct-sample/roberta-tapt \
-#         --hyperparameters ROBERTA_CLASSIFIER_MINI \
-#         --perf +accuracy \
-#         --dataset rct-sample \
-#         --device 0 \
-#         --override \
-#         --evaluate_on_test \
-#         --seed 212131

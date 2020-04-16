@@ -85,14 +85,19 @@ def main():
         os.environ['CUDA_DEVICE'] = args.device
 
     environment = HYPERPARAMETERS[args.hyperparameters.upper()]
+    
+    if "classifier.jsonnet" in args.config:
+        dataset_type = "CLASSIFICATION"
+    elif "ner.jsonnet" in args.config:
+        dataset_type = "NER"
 
-    if not DATASETS.get(args.dataset):
-        raise ValueError(f"{args.dataset} not a valid dataset for this config. choose from the following available datasets: {list(DATASETS[args.dataset].keys())}")
+    if not DATASETS[dataset_type].get(args.dataset):
+        raise ValueError(f"{args.dataset} not a valid dataset for this config. choose from the following available datasets: {list(DATASETS[dataset_type].keys())}")
+
     os.environ['DATASET'] = args.dataset
-
-    os.environ['MODEL_NAME'] = str(args.model)
-    os.environ['DATA_DIR'] = DATASETS[args.dataset]['data_dir']
-    os.environ['DATASET_SIZE'] = str(DATASETS[args.dataset]['dataset_size'])
+    os.environ['MODEL_NAME'] = args.model
+    os.environ['DATA_DIR'] = DATASETS[dataset_type][args.dataset]['data_dir']
+    os.environ['DATASET_SIZE'] = str(DATASETS[dataset_type][args.dataset]['dataset_size'])
 
     for key, val in environment.items():
         os.environ[key]  = str(val)
