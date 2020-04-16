@@ -95,7 +95,7 @@ def main():
         raise ValueError(f"{args.dataset} not a valid dataset for this config. choose from the following available datasets: {list(DATASETS[dataset_type].keys())}")
 
     os.environ['DATASET'] = args.dataset
-    os.environ['MODEL_NAME'] = args.model
+    os.environ['MODEL_NAME'] = str(args.model)
     os.environ['DATA_DIR'] = DATASETS[dataset_type][args.dataset]['data_dir']
     os.environ['DATASET_SIZE'] = str(DATASETS[dataset_type][args.dataset]['dataset_size'])
 

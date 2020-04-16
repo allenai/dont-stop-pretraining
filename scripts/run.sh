@@ -4,8 +4,7 @@ dataset=$3
 big=$4
 name_prefix=$5
 perf=$6
-task_type=$7
-server=$8
+server=$7
 
 if [[ $task == 1 ]];
 then
@@ -27,7 +26,7 @@ fi
 
 srun -w $server -p allennlp_hipri --gpus=1 python -m scripts.train \
     --config ./training_config/$task.jsonnet \
-    --serialization_dir ./model_logs/${name_prefix}_${task}_${dataset}_20389    \
+    --serialization_dir ./model_logs/${name_prefix}_${task}_${dataset}_20389 \
     --model $model \
     --hyperparameters $hp \
     --perf $perf \

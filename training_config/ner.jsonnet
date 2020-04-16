@@ -20,10 +20,13 @@ local BATCH_SIZE = std.parseInt(std.extVar("BATCH_SIZE"));
 // will sample this amount of training data, if set
 local TRAIN_THROTTLE = std.parseInt(std.extVar("TRAIN_THROTTLE"));
 // gradient accumulation batch size
-local GRAD_ACC = std.parseInt(std.extVar("NUM_GRAD_ACC_STEPS"));
+local GRAD_ACC = std.parseInt(std.extVar("GRAD_ACC_BATCH_SIZE"));
 // skip early stopping? turning this on will prevent dev eval at each epoch.
 local SKIP_EARLY_STOPPING = std.parseInt(std.extVar("SKIP_EARLY_STOPPING")) == 1;
-local SKIP_TRAINING = std.parseInt(std.extVar("SKIP_TRAINING")) == 1;
+
+local LR_SCHEDULE = std.parseInt(std.extVar("LR_SCHEDULE")) == 1;
+// validation metric
+local VALIDATION_METRIC = std.extVar("VALIDATION_METRIC");
 // are we jackknifing? only for hyperpartisan.
 local JACKKNIFE = std.parseInt(std.extVar("JACKKNIFE")) == 1;
 // jacknife file extension. only for hyperpartisan.
@@ -165,7 +168,7 @@ local ENCODER_OUTPUT_DIM = PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['embeddi
         "checkpointer": PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['checkpointer'],
         "optimizer": PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['optimizer'],
         "gradient_accumulation_batch_size": GRAD_ACC,
-    } + if SKIP_TRAINING then {"type": "no_op"} else {}
+    }
 }
 
 

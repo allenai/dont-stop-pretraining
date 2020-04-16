@@ -1,11 +1,11 @@
-from typing import Dict, Optional, List, Any, Union
+from typing import Dict, Optional, List, Any
 
 from overrides import overrides
 import torch
 from torch.nn.modules.linear import Linear
 
 from allennlp.common.checks import check_dimensions_match, ConfigurationError
-from allennlp.data import Vocabulary, TextFieldTensors
+from allennlp.data import Vocabulary
 from allennlp.modules import Seq2SeqEncoder, TimeDistributed, TextFieldEmbedder
 from allennlp.modules import ConditionalRandomField, FeedForward
 from allennlp.modules.conditional_random_field import allowed_transitions
@@ -69,7 +69,7 @@ class BertCrfTagger(Model):
                  include_start_end_transitions: bool = True,
                  constrain_crf_decoding: bool = None,
                  calculate_span_f1: bool = None,
-                 dropout: Union[str, float] = 0.1,
+                 dropout: float = 0.1,
                  verbose_metrics: bool = False,
                  initializer: InitializerApplicator = InitializerApplicator(),
                  regularizer: Optional[RegularizerApplicator] = None) -> None:
@@ -79,7 +79,7 @@ class BertCrfTagger(Model):
         self.text_field_embedder = text_field_embedder
         self.num_tags = self.vocab.get_vocab_size(label_namespace)
         self._verbose_metrics = verbose_metrics
-        self.dropout = torch.nn.Dropout(float(dropout))
+        self.dropout = torch.nn.Dropout(dropout)
         self.tag_projection_layer = TimeDistributed(
             Linear(self.text_field_embedder.get_output_dim(), self.num_tags)
         )
@@ -127,7 +127,7 @@ class BertCrfTagger(Model):
 
     @overrides
     def forward(self,  # type: ignore
-                tokens: TextFieldTensors, 
+                tokens: Dict[str, torch.LongTensor],
                 tags: torch.LongTensor = None,
                 metadata: List[Dict[str, Any]] = None,
                 # pylint: disable=unused-argument
@@ -162,8 +162,8 @@ class BertCrfTagger(Model):
         loss : ``torch.FloatTensor``, optional
             A scalar loss to be optimised. Only computed if gold label ``tags`` are provided.
         """
-        mask = util.get_text_field_mask(tokens)
         embedded_text_input = self.text_field_embedder(tokens)
+        mask = util.get_text_field_mask(tokens)
 
         embedded_text_input = self.dropout(embedded_text_input)
 
@@ -188,12 +188,26 @@ class BertCrfTagger(Model):
                     class_probabilities[i, j, tag_id] = 1
 
             for metric in self.metrics.values():
-                metric(class_probabilities, tags, mask.bool())
+                metric(class_probabilities, tags, mask.float())
             if self.calculate_span_f1:
-                self._f1_metric(class_probabilities, tags, mask.bool())
+                self._f1_metric(class_probabilities, tags, mask.float())
         if metadata is not None:
             output["words"] = [x["words"] for x in metadata]
         return output
+
+    @overrides
+    def decode(self, output_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Converts the tag ids to the actual tags.
+        ``output_dict["tags"]`` is a list of lists of tag_ids,
+        so we use an ugly nested list comprehension.
+        """
+        output_dict["tags"] = [
+                [self.vocab.get_token_from_index(tag, namespace=self.label_namespace)
+                 for tag in instance_tags]
+                for instance_tags in output_dict["tags"]
+        ]
+        return output_dict
 
     @overrides
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
@@ -205,7 +219,7 @@ class BertCrfTagger(Model):
                 metrics_to_return[metric_name] = metric_obj.get_metric(reset)
             elif metric_name.startswith('F1_'):
                 p, r, f1 = metric_obj.get_metric(reset)
-                # metrics_to_return[metric_name] = f1
+                metrics_to_return[metric_name] = f1
                 total_f1 += f1
                 total_classes += 1
         metrics_to_return['avg_f1'] = total_f1 / total_classes
