@@ -4,7 +4,7 @@ server=$2
 if [[ $dataset == "rct-sample" ]];
 then
     domain="med"
-    big=0
+    big=2
     oracle_tapt=1
     perf="+accuracy"
 elif [[ $dataset == "rct-20k" ]];
@@ -40,7 +40,7 @@ then
 elif [[ $dataset == "hyperpartisan_news" ]];
 then
     domain="news"
-    big=0
+    big=2
     oracle_tapt=1
     perf="+f1"
 elif [[ $dataset == "citation_intent" ]];
@@ -85,7 +85,7 @@ then
 fi
 
 ## TRANSFER TAPTS
-if [[ $dataset == "amazon" ]];
+if [$[ dataset == "amazon" ]];
 then
     bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/imdb/roberta-oracle-tapt classifier $dataset $big transfer_tapt $perf $server
 elif [[ $dataset == "imdb" ]];
@@ -109,4 +109,24 @@ then
 elif [[ $dataset == "hyperpartisan_news" ]];
 then
     bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/ag/roberta-tapt classifier $dataset $big transfer_tapt $perf $server
+fi
+
+if [[ $dataset == "citation_intent" ]];
+then
+    bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/$dataset/roberta-k-50 classifier $dataset $big knn_50 $perf $server
+    bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/$dataset/roberta-k-150 classifier $dataset $big knn_150 $perf $server
+    bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/$dataset/roberta-k-500 classifier $dataset $big knn_500 $perf $server
+    bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/citation_intent/roberta-rand-k-50 classifier citation_intent 0 rand_knn_50 +f1 allennlp-server4
+elif [[ $dataset == "rct-sample" ]];
+then
+    bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/$dataset/roberta-k-50 classifier $dataset $big knn_50 $perf $server
+    bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/$dataset/roberta-k-150 classifier $dataset $big knn_150 $perf $server
+    bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/$dataset/roberta-k-500 classifier $dataset $big knn_500 $perf $server
+    bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/$dataset/roberta-rand-k-50 classifier $dataset $big rand_knn_50 $perf $server
+elif [[ $dataset == "chemprot" ]];
+then
+    bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/$dataset/roberta-k-50 classifier $dataset $big knn_50 $perf $server
+    bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/$dataset/roberta-k-150 classifier $dataset $big knn_150 $perf $server
+    bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/$dataset/roberta-k-500 classifier $dataset $big knn_500 $perf $server
+    bash scripts/run.sh /net/nfs.corp/allennlp/suching/acl_2020_models/$dataset/roberta-rand-k-50 classifier $dataset $big rand_knn_50 $perf $server
 fi

@@ -9,6 +9,9 @@ server=$7
 if [[ $big == 1 ]];
 then
     hp="ROBERTA_CLASSIFIER_BIG"
+elif [[ $big == 2 ]];
+then
+    hp="ROBERTA_CLASSIFIER_MINI"
 else
     hp="ROBERTA_CLASSIFIER_SMALL"
 fi
@@ -141,11 +144,11 @@ srun -w $server -p allennlp_hipri --gpus=1 python -m scripts.train \
 
 # srun -w allennlp-server4 -p allennlp_hipri --gpus=1 python -m scripts.train \
 #         --config ./training_config/classifier.jsonnet \
-#         --serialization_dir ./model_logs/dapt_tapt_classifer_chemprot_212131    \
-#         --model /net/nfs.corp/allennlp/suching/acl_2020_models/chemprot/roberta-dapt-tapt \
-#         --hyperparameters ROBERTA_CLASSIFIER_SMALL \
+#         --serialization_dir ./model_logs/tapt_classifer_new    \
+#         --model /net/nfs.corp/allennlp/suching/acl_2020_models/rct-sample/roberta-tapt \
+#         --hyperparameters ROBERTA_CLASSIFIER_MINI \
 #         --perf +accuracy \
-#         --dataset chemprot \
+#         --dataset rct-sample \
 #         --device 0 \
 #         --override \
 #         --evaluate_on_test \
