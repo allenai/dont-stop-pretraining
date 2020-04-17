@@ -8,39 +8,90 @@ Code associated with the Don't Stop Pretraining ACL 2020 paper
 conda env create -f environment.yml
 ```
 
+## Models
+
+We've uploaded our DAPT and TAPT models to [huggingface](https://huggingface.co/allenai).
+
+## Available Pretrained Models
+
+Unlike in `master`, using the uploaded models on huggingface is easy -- no need to manually download models beforehand.
+
+
+### DAPT models
+
+```
+allenai/cs-roberta-base
+allenai/biomed-roberta-base
+allenai/reviews-roberta-base
+allenai/news-roberta-base
+```
+
+
+### TAPT models
+
+The path to an available model (TAPT, DAPT + TAPT, etc.) follows the same URL structure:
+
+```bash
+https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/models/$DATASET/$TAPT_MODEL
+```
+
+Available values for `DATASET`:
+
+```
+chemprot
+rct-20k
+rct-sample
+citation_intent
+sciie
+amazon
+imdb
+ag
+hyperpartisan_news
+```
+
+Available values for `TAPT_MODEL`:
+
+```
+allenai/${DATASET}-roberta-tapt-base
+allenai/${DATASET}-roberta-dapt-tapt-base
+```
+
+For `imdb`, `rct-sample`, and `hyperpartisan_news`, we additionally release Curated TAPT models:
+
+```
+allenai/${DATASET}-roberta-curated-tapt-base
+allenai/${DATASET}-roberta-dapt-curated-tapt-base
+```
+
 ## Example commands
 
 ### Run basic RoBERTa model
 
-We have stored all the task data in `s3://allennlp/datasets/`. You can download this data into your local server with the `scripts/download_data.sh` script.
+All task data is available on a public S3 url; check `environments/datasets.py`.
 
-```bash
-bash scripts/download.sh
-```
-
-The following command will train a RoBERTa classifier on the AG corpus. Check `scripts/train.py` for other dataset names and tasks you can pass to the `--dataset` flag.
+The following command will train a RoBERTa classifier on the Citation Intent corpus. Check `environments/datasets.py` for other datasets you can pass to the `--dataset` flag.
 
 ```
 python -m scripts.train \
         --config training_config/classifier.jsonnet \
-        --serialization_dir model_logs/ag_base \
-        --hyperparameters ROBERTA_CLASSIFIER \
-        --dataset ag \
+        --serialization_dir model_logs/citation-intent-base \
+        --hyperparameters ROBERTA_CLASSIFIER_SMALL \
+        --dataset citation_intent \
+        --model roberta-base \
         --device 0 \
-        --override \
         --evaluate_on_test
 ```
 
-The following command will train a RoBERTa tagger on the NCBI corpus. 
+You can supply other uploaded models to this script, just by providing the right name:
 
 ```
 python -m scripts.train \
-        --config ./training_config/ner.jsonnet \
-        --serialization_dir ./model_logs/base_ncbi \
-        --hyperparameters ROBERTA_TAGGER \
-        --dataset ncbi \
+        --config training_config/classifier.jsonnet \
+        --serialization_dir model_logs/citation-intent-base \
+        --hyperparameters ROBERTA_CLASSIFIER_SMALL \
+        --dataset citation_intent \
+        --model allenai/citation_intent-roberta-dapt-tapt-base \
         --device 0 \
-        --override \
         --evaluate_on_test
 ```
 
