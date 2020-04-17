@@ -2,7 +2,6 @@ MODEL=$1
 OUTDIR=$2
 URL=https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/models/$MODEL
 
-
 if [[ ! -d $OUTDIR ]];
 then
     mkdir -p $OUTDIR

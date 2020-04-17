@@ -84,7 +84,10 @@ You can download a pretrained model using the `scripts/download_model.sh` script
 Just supply a dataset, model type, and output directory (in that order), like so:
 
 ```bash
-bash scripts/download_tapt_model.sh citation_intent roberta-dapt-tapt $(pwd)/pretrained_models/citation_intent/roberta-dapt-tapt
+bash scripts/download_tapt_model.sh \
+        citation_intent \
+        roberta-dapt-tapt \
+        $(pwd)/pretrained_models/citation_intent/roberta-dapt-tapt
 ```
 
 This will output the roberta-dapt-tapt model for Citation Intent corpus in `$(pwd)/pretrained_models/citation_intent/roberta-dapt-tapt`
