@@ -6,6 +6,7 @@ Code associated with the Don't Stop Pretraining ACL 2020 paper
 
 ```
 conda env create -f environment.yml
+conda activate domains
 ```
 
 ## Models
@@ -16,52 +17,47 @@ We've uploaded our DAPT and TAPT models to [huggingface](https://huggingface.co/
 
 Unlike in `master`, using the uploaded models on huggingface is easy -- no need to manually download models beforehand.
 
-
 ### DAPT models
 
-```
-allenai/cs-roberta-base
-allenai/biomed-roberta-base
-allenai/reviews-roberta-base
-allenai/news-roberta-base
-```
+Available `DAPT` models:
 
+```
+allenai/cs_roberta_base
+allenai/biomed_roberta_base
+allenai/reviews_roberta_base
+allenai/news_roberta_base
+```
 
 ### TAPT models
 
-The path to an available model (TAPT, DAPT + TAPT, etc.) follows the same URL structure:
-
-```bash
-https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/models/$DATASET/$TAPT_MODEL
-```
-
-Available values for `DATASET`:
+Available `TAPT` models:
 
 ```
-chemprot
-rct-20k
-rct-sample
-citation_intent
-sciie
-amazon
-imdb
-ag
-hyperpartisan_news
+allenai/dsp_roberta_base_dapt_news_tapt_ag_115K
+allenai/dsp_roberta_base_tapt_ag_115K
+allenai/dsp_roberta_base_dapt_reviews_tapt_amazon_helpfulness_115K
+allenai/dsp_roberta_base_tapt_amazon_helpfulness_115K
+allenai/dsp_roberta_base_dapt_biomed_tapt_chemprot_4169
+allenai/dsp_roberta_base_tapt_chemprot_4169
+allenai/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688
+allenai/dsp_roberta_base_tapt_citation_intent_1688
+allenai/dsp_roberta_base_dapt_news_tapt_hyperpartisan_news_5015
+allenai/dsp_roberta_base_dapt_news_tapt_hyperpartisan_news_515
+allenai/dsp_roberta_base_tapt_hyperpartisan_news_5015
+allenai/dsp_roberta_base_tapt_hyperpartisan_news_515
+allenai/dsp_roberta_base_dapt_reviews_tapt_imdb_20000
+allenai/dsp_roberta_base_dapt_reviews_tapt_imdb_70000
+allenai/dsp_roberta_base_tapt_imdb_20000
+allenai/dsp_roberta_base_tapt_imdb_70000
+allenai/dsp_roberta_base_dapt_biomed_tapt_rct_180K
+allenai/dsp_roberta_base_tapt_rct_180K
+allenai/dsp_roberta_base_dapt_biomed_tapt_rct_500
+allenai/dsp_roberta_base_tapt_rct_500
+allenai/dsp_roberta_base_dapt_cs_tapt_sciie_3219
+allenai/dsp_roberta_base_tapt_sciie_3219
 ```
 
-Available values for `TAPT_MODEL`:
-
-```
-allenai/${DATASET}-roberta-tapt-base
-allenai/${DATASET}-roberta-dapt-tapt-base
-```
-
-For `imdb`, `rct-sample`, and `hyperpartisan_news`, we additionally release Curated TAPT models:
-
-```
-allenai/${DATASET}-roberta-curated-tapt-base
-allenai/${DATASET}-roberta-dapt-curated-tapt-base
-```
+The final numbers in each model above are the dataset sizes. Larger dataset sizes (e.g. imdb_70000 vs. imdb_20000) are curated TAPT models. These only exist for `imdb`, `rct`, and `hyperpartisan_news`.
 
 ## Example commands
 
@@ -90,7 +86,7 @@ python -m scripts.train \
         --serialization_dir model_logs/citation-intent-base \
         --hyperparameters ROBERTA_CLASSIFIER_SMALL \
         --dataset citation_intent \
-        --model allenai/citation_intent-roberta-dapt-tapt-base \
+        --model allenai/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688 \
         --device 0 \
         --evaluate_on_test
 ```
@@ -114,3 +110,8 @@ allentune search \
 ```
 
 Modify `--num-gpus` and `--num-samples` accordingly.
+
+
+
+
+
