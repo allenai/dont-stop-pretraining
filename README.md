@@ -6,6 +6,7 @@ Code associated with the Don't Stop Pretraining ACL 2020 paper
 
 ```
 conda env create -f environment.yml
+conda activate domains
 ```
 
 ### Working with the latest allennlp version
