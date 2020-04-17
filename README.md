@@ -37,36 +37,32 @@ allenai/news_roberta_base
 Available `TAPT` models:
 
 ```
-allenai/chemprot_roberta_tapt_base
-allenai/chemprot_roberta_dapt_tapt_base
-allenai/rct_180K_roberta_tapt_base
-allenai/rct_180K_roberta_dapt_tapt_base
-allenai/rct_500_roberta_tapt_base
-allenai/rct_500_roberta_dapt_tapt_base
-allenai/citation_intent_roberta_tapt_base
-allenai/citation_intent_roberta_dapt_tapt_base
-allenai/sciie_roberta_tapt_base
-allenai/sciie_roberta_dapt_tapt_base
-allenai/amazon_helpfulness_roberta_tapt_base
-allenai/amazon_helpfulness_roberta_dapt_tapt_base
-allenai/imdb_roberta_tapt_base
-allenai/imdb_roberta_dapt_tapt_base
-allenai/ag_roberta_tapt_base
-allenai/ag_roberta_dapt_tapt_base
-allenai/hyperpartisan_news_roberta_tapt_base
-allenai/hyperpartisan_news_roberta_dapt_tapt_base
+dsp_roberta_base_dapt_news_tapt_ag_115K
+dsp_roberta_base_tapt_ag_115K
+dsp_roberta_base_dapt_reviews_tapt_amazon_helpfulness_115K
+dsp_roberta_base_tapt_amazon_helpfulness_115K
+dsp_roberta_base_dapt_biomed_tapt_chemprot_4169
+dsp_roberta_base_tapt_chemprot_4169
+dsp_roberta_base_dapt_cs_tapt_citation_intent_1688
+dsp_roberta_base_tapt_citation_intent_1688
+dsp_roberta_base_dapt_news_tapt_hyperpartisan_news_5015
+dsp_roberta_base_dapt_news_tapt_hyperpartisan_news_515
+dsp_roberta_base_tapt_hyperpartisan_news_5015
+dsp_roberta_base_tapt_hyperpartisan_news_515
+dsp_roberta_base_dapt_reviews_tapt_imdb_20000
+dsp_roberta_base_dapt_reviews_tapt_imdb_70000
+dsp_roberta_base_tapt_imdb_20000
+dsp_roberta_base_tapt_imdb_70000
+dsp_roberta_base_dapt_biomed_tapt_rct_180K
+dsp_roberta_base_tapt_rct_180K
+dsp_roberta_base_dapt_biomed_tapt_rct_500
+dsp_roberta_base_tapt_rct_500
+dsp_roberta_base_dapt_cs_tapt_sciie_3219
+dsp_roberta_base_tapt_sciie_3219
 ```
 
-For `imdb`, `rct_500`, and `hyperpartisan_news`, we additionally release `Curated TAPT` models:
+The final numbers are the dataset sizes. Larger dataset sizes (e.g. imdb_70000 vs. imdb_20000) are curated TAPT models. These only exist for `imdb`, `rct`, and `hyperpartisan_news`.
 
-```
-allenai/imdb_roberta_curated_tapt
-allenai/imdb_roberta_dapt_curated_tapt
-allenai/rct_500_roberta_curated_tapt
-allenai/rct_500_roberta_dapt_curated_tapt
-allenai/hyperpartisan_news_roberta_curated_tapt
-allenai/hyperpartisan_news_roberta_dapt_curated_tapt
-```
 
 ### Downloading Pretrained models
 
@@ -76,8 +72,8 @@ Just supply a model type and serialization directory, like so:
 
 ```bash
 python -m scripts/download_model \
-        --model allenai/citation_intent_dapt_tapt_roberta_base \
-        --serialization_dir $(pwd)/pretrained_models/allenai/citation_intent_dapt_tapt_roberta_base
+        --model allenai/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688 \
+        --serialization_dir $(pwd)/pretrained_models/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688
 ```
 
 This will output the `citation_intent_dapt_tapt_roberta_base` model for Citation Intent corpus in `$(pwd)/pretrained_models/allenai/citation_intent_dapt_tapt_roberta_base`
@@ -109,7 +105,7 @@ python -m scripts.train \
         --serialization_dir model_logs/citation-intent-dapt-dapt \
         --hyperparameters ROBERTA_CLASSIFIER_SMALL \
         --dataset citation_intent \
-        --model $(pwd)/pretrained_models/allenai/citation_intent_dapt_tapt_roberta_base \
+        --model $(pwd)/pretrained_models/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688 \
         --device 0 \
         --evaluate_on_test
 ```
