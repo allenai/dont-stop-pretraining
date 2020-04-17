@@ -39,10 +39,10 @@ Available `TAPT` models:
 ```
 allenai/chemprot_roberta_tapt_base
 allenai/chemprot_roberta_dapt_tapt_base
-allenai/rct-180K_roberta_tapt_base
-allenai/rct-180K_roberta_dapt_tapt_base
-allenai/rct-500_roberta_tapt_base
-allenai/rct-500_roberta_dapt_tapt_base
+allenai/rct_180K_roberta_tapt_base
+allenai/rct_180K_roberta_dapt_tapt_base
+allenai/rct_500_roberta_tapt_base
+allenai/rct_500_roberta_dapt_tapt_base
 allenai/citation_intent_roberta_tapt_base
 allenai/citation_intent_roberta_dapt_tapt_base
 allenai/sciie_roberta_tapt_base
