@@ -18,15 +18,7 @@ This repository works with a pinned allennlp version for reproducibility purpose
 
 To run this code with the latest `allennlp`/ `transformers` version (and use the huggingface model repository to its full capacity) checkout the branch `latest-allennlp`. Caution that we haven't tested out all models on this branch, so your results may vary from what we report in paper.
 
-If you'd like to use this pinned allennlp version, read on.
-
-## Download Models from huggingface.
-
-Use the `transformers-cli` to download a model from [huggingface](https://huggingface.co/allenai) locally
-
-```
-transformers-cli download allenai/cs_roberta_base --cache-dir pretrained_models/cs_roberta_base
-```
+If you'd like to use this pinned allennlp version, read on. Otherwise, checkout `latest-allennlp`.
 
 ## Available Pretrained Models
 
