@@ -43,8 +43,8 @@ allenai/rct-180K_roberta_tapt_base
 allenai/rct-180K_roberta_dapt_tapt_base
 allenai/rct-500_roberta_tapt_base
 allenai/rct-500_roberta_dapt_tapt_base
-allenai/citation-intent_roberta_tapt_base
-allenai/citation-intent_roberta_dapt_tapt_base
+allenai/citation_intent_roberta_tapt_base
+allenai/citation_intent_roberta_dapt_tapt_base
 allenai/sciie_roberta_tapt_base
 allenai/sciie_roberta_dapt_tapt_base
 allenai/amazon_helpfulness_roberta_tapt_base
