@@ -77,7 +77,7 @@ python -m scripts/download_model \
         --serialization_dir $(pwd)/pretrained_models/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688
 ```
 
-This will output the `citation_intent_dapt_tapt_roberta_base` model for Citation Intent corpus in `$(pwd)/pretrained_models/allenai/citation_intent_dapt_tapt_roberta_base`
+This will output the `allenai/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688` model for Citation Intent corpus in `$(pwd)/pretrained_models/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688`
 
 ## Example commands
 
