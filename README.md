@@ -123,7 +123,7 @@ You can supply other downloaded models to this script, by providing a path to th
 ```
 python -m scripts.train \
         --config training_config/classifier.jsonnet \
-        --serialization_dir model_logs/citation-intent-base \
+        --serialization_dir model_logs/citation-intent-dapt-dapt \
         --hyperparameters ROBERTA_CLASSIFIER_SMALL \
         --dataset citation_intent \
         --model $(pwd)/pretrained_models/citation_intent/roberta-dapt-tapt \
