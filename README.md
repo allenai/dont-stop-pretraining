@@ -8,10 +8,6 @@ Code associated with the Don't Stop Pretraining ACL 2020 paper
 conda env create -f environment.yml
 ```
 
-## Models
-
-We've uploaded our DAPT and TAPT models to [huggingface](https://huggingface.co/allenai).
-
 ### Working with the latest allennlp version
 
 This repository works with a pinned allennlp version for reproducibility purposes. This pinned version of allennlp relies on `pytorch-transformers==1.2.0`, which requires you to manually download custom transformer models on disk. 
@@ -22,82 +18,69 @@ If you'd like to use this pinned allennlp version, read on. Otherwise, checkout 
 
 ## Available Pretrained Models
 
+We've uploaded `DAPT` and `TAPT` models to [huggingface](https://huggingface.co/allenai).
 
 ### DAPT models
 
-The path to an available DAPT model follows the same URL structure:
-
-```bash
-https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/models/$DAPT_MODEL
-```
-
-Available values for `DAPT_MODEL`:
+Available `DAPT` models:
 
 ```
-cs-roberta
-med-roberta
-review-roberta
-news-roberta
+allenai/cs_roberta_base
+allenai/biomed_roberta_base
+allenai/reviews_roberta_base
+allenai/news_roberta_base
 ```
 
 
 ### TAPT models
 
-The path to an available model (TAPT, DAPT + TAPT, etc.) follows the same URL structure:
-
-```bash
-https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/models/$DATASET/$TAPT_MODEL
-```
-
-Available values for `DATASET`:
+Available `TAPT` models:
 
 ```
-chemprot
-rct-20k
-rct-sample
-citation_intent
-sciie
-amazon
-imdb
-ag
-hyperpartisan_news
+allenai/chemprot_roberta_tapt_base
+allenai/chemprot_roberta_dapt_tapt_base
+allenai/rct-180K_roberta_tapt_base
+allenai/rct-180K_roberta_dapt_tapt_base
+allenai/rct-500_roberta_tapt_base
+allenai/rct-500_roberta_dapt_tapt_base
+allenai/citation-intent_roberta_tapt_base
+allenai/citation-intent_roberta_dapt_tapt_base
+allenai/sciie_roberta_tapt_base
+allenai/sciie_roberta_dapt_tapt_base
+allenai/amazon_helpfulness_roberta_tapt_base
+allenai/amazon_helpfulness_roberta_dapt_tapt_base
+allenai/imdb_roberta_tapt_base
+allenai/imdb_roberta_dapt_tapt_base
+allenai/ag_roberta_tapt_base
+allenai/ag_roberta_dapt_tapt_base
+allenai/hyperpartisan_news_roberta_tapt_base
+allenai/hyperpartisan_news_roberta_dapt_tapt_base
 ```
 
-Available values for `TAPT_MODEL`:
+For `imdb`, `rct-sample`, and `hyperpartisan_news`, we additionally release `Curated TAPT` models:
 
 ```
-roberta-tapt
-roberta-dapt-tapt
-```
-
-For `imdb`, `rct-sample`, and `hyperpartisan_news`, we additionally release Curated TAPT models:
-
-```
-roberta-curated-tapt
-roberta-dapt-curated-tapt
+imdb_roberta_curated_tapt
+imdb_roberta_dapt_curated_tapt
+rct_500_roberta_curated_tapt
+rct_500_roberta_dapt_curated_tapt
+hyperpartisan_news_roberta_curated_tapt
+hyperpartisan_news_roberta_dapt_curated_tapt
 ```
 
 ### Downloading Pretrained models
 
-You can download a pretrained model using the `scripts/download_model.sh` script.
+You can download a pretrained model using the `scripts/download_model.py` script.
 
-Just supply a dataset, model type, and output directory (in that order), like so:
-
-```bash
-bash scripts/download_tapt_model.sh \
-        citation_intent \
-        roberta-dapt-tapt \
-        $(pwd)/pretrained_models/citation_intent/roberta-dapt-tapt
-```
-
-This will output the roberta-dapt-tapt model for Citation Intent corpus in `$(pwd)/pretrained_models/citation_intent/roberta-dapt-tapt`
-
-
-Alternatively, download a DAPT model:
+Just supply a model type and serialization directory, like so:
 
 ```bash
-bash scripts/download_dapt_model.sh cs-roberta $(pwd)/pretrained_models/cs-roberta
+python -m scripts/download_model \
+        --model allenai/citation_intent_dapt_tapt_roberta_base \
+        --serialization_dir $(pwd)/pretrained_models/allenai/citation_intent_dapt_tapt_roberta_base
 ```
+
+This will output the `citation_intent_dapt_tapt_roberta_base` model for Citation Intent corpus in `$(pwd)/pretrained_models/allenai/citation_intent_dapt_tapt_roberta_base`
 
 ## Example commands
 
@@ -126,7 +109,7 @@ python -m scripts.train \
         --serialization_dir model_logs/citation-intent-dapt-dapt \
         --hyperparameters ROBERTA_CLASSIFIER_SMALL \
         --dataset citation_intent \
-        --model $(pwd)/pretrained_models/citation_intent/roberta-dapt-tapt \
+        --model $(pwd)/pretrained_models/allenai/citation_intent_dapt_tapt_roberta_base \
         --device 0 \
         --evaluate_on_test
 ```
