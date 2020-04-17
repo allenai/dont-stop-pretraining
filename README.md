@@ -60,12 +60,12 @@ allenai/hyperpartisan_news_roberta_dapt_tapt_base
 For `imdb`, `rct_500`, and `hyperpartisan_news`, we additionally release `Curated TAPT` models:
 
 ```
-imdb_roberta_curated_tapt
-imdb_roberta_dapt_curated_tapt
-rct_500_roberta_curated_tapt
-rct_500_roberta_dapt_curated_tapt
-hyperpartisan_news_roberta_curated_tapt
-hyperpartisan_news_roberta_dapt_curated_tapt
+allenai/imdb_roberta_curated_tapt
+allenai/imdb_roberta_dapt_curated_tapt
+allenai/rct_500_roberta_curated_tapt
+allenai/rct_500_roberta_dapt_curated_tapt
+allenai/hyperpartisan_news_roberta_curated_tapt
+allenai/hyperpartisan_news_roberta_dapt_curated_tapt
 ```
 
 ### Downloading Pretrained models
