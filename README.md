@@ -57,7 +57,7 @@ allenai/hyperpartisan_news_roberta_tapt_base
 allenai/hyperpartisan_news_roberta_dapt_tapt_base
 ```
 
-For `imdb`, `rct-sample`, and `hyperpartisan_news`, we additionally release `Curated TAPT` models:
+For `imdb`, `rct_500`, and `hyperpartisan_news`, we additionally release `Curated TAPT` models:
 
 ```
 imdb_roberta_curated_tapt
