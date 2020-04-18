@@ -37,7 +37,7 @@ Get `https://dl.fbaipublicfiles.com/fairseq/models/roberta.base.tar.gz` and unco
 ### Convert a huggingface checkpoint to a fairseq checkpoint
 
 ```
-cd fairseq
+cd fairseq_study
 python convert_hf_to_fairseq.py  --fairseq_path <path_to_fairseq_checkpoint>  --hf_path <path_to_hf_checkpoint>
 ```
 
