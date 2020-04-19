@@ -65,15 +65,15 @@ cat world.jsonl | pv | parallel --pipe -q jq -rc '.text | gsub("[\\n\\t]"; "")' 
 Train a BPE model on the world:
 
 ```bash
-python scripts/near_micro/train_wordpiece_model.py --input_file world.txt --tokenizer_type BPE --serialization_dir world.bpe.model --vocab_size 5000
+python scripts/selection/train_tokenizer.py --input_file world.txt --tokenizer_type BPE --serialization_dir world.bpe.model --vocab_size 5000
 ```
 
 Tokenize `world.jsonl`, `domain.jsonl`, and `task.josnl` with your trained BPE model:
 
 ```bash
-cat world.txt | pv | parallel --pipe -q python scripts/near_micro/tokenize_wordpieces.py --tokenizer world.bpe.model --lower  > world.tok
-cat domain.jsonl | pv | parallel --pipe -q python scripts/near_micro/tokenize_wordpieces.py --tokenizer world.bpe.model --json --lower > domain.tok.jsonl
-cat task.jsonl | pv | parallel --pipe -q python scripts/near_micro/tokenize_wordpieces.py --tokenizer world.bpe.model --json --lower > task.tok.jsonl
+cat world.txt | pv | parallel --pipe -q python scripts/selection/tokenize.py --tokenizer world.bpe.model --lower  > world.tok
+cat domain.jsonl | pv | parallel --pipe -q python scripts/selection/tokenize.py --tokenizer world.bpe.model --json --lower > domain.tok.jsonl
+cat task.jsonl | pv | parallel --pipe -q python scripts/selection/tokenize.py --tokenizer world.bpe.model --json --lower > task.tok.jsonl
 ```
 
 Split world into train and dev of appropriate sizes, depending on how much you want to train VAMPIRE on.
@@ -108,7 +108,7 @@ python -m scripts.train --config training_config/vampire.jsonnet  --serializatio
 
 Shard the `macro.jsonl` and `micro.jsonl` for parallel embedding extraction:
 
-```
+```bash
 cd $ROOT_DIR
 mkdir task_shards/
 split --lines 100 --numeric-suffixes task.tok.jsonl task_shards/
@@ -118,20 +118,19 @@ split --lines 5000 --numeric-suffixes domain.tok.jsonl domain_shards/
 mkdir domain_emb/
 ```
 
-Extract VAMPIRE embeddings on the domain and and task data using the trained VAMPIRE model from Step 7.
+Extract VAMPIRE embeddings on the domain and and task data using the trained VAMPIRE model from previous step.
 
 ```bash
-cd $VAMPIRE_DIR
+parallel --ungroup python -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/task_emb/{1/.} --silent ::: ${ROOT_DIR}/task_shards/*
 
-parallel --ungroup python -m scripts.predict ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/task_emb/{1/.} --silent ::: ${ROOT_DIR}/task_shards/*
-
-parallel --ungroup python -m scripts.predict ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/domain_emb/{1/.} --silent ::: ${ROOT_DIR}/domain_shards/*
+parallel --ungroup python -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/domain_emb/{1/.} --silent ::: ${ROOT_DIR}/domain_shards/*
 ```
 
-11. Run FAISS k-nearest neighbors on the VAMPIRE embeddings to generate a file of near-micro examples from the macro domain.
+## Run Faiss
+
+Run FAISS k-nearest neighbors on the VAMPIRE embeddings to generate a file of near-micro examples from the macro domain.
 
 ```bash
-cd $ROOT_DIR
 python ${ROOT_DIR}/scripts/near_micro/convert_pytorch_to_memmap.py "task_emb/*"
 python ${ROOT_DIR}/scripts/near_micro/convert_pytorch_to_memmap.py "domain_emb/*"
 
@@ -139,5 +138,3 @@ python -m scripts.near_micro.build_index --vecs ${ROOT_DIR}/domain_emb/ --text $
 
 python -m scripts.near_micro.query_index --vecs ${ROOT_DIR}/task_emb/ --text ${ROOT_DIR}/task.jsonl --dim 64 --load-index domain_index --device 0 --batch-size 32 --k 5 --inspect > selected.knn.5
 ```
-
-Inspect the nearest neighbors by supplying the `--inspect` flag.

@@ -20,4 +20,4 @@ if __name__ == '__main__':
             fp_ids = open_memmap(file_ + ".id.npy", dtype=np.float32, mode='w+', shape=(ids.shape[0], ids.shape[1]))
             fp_ids[...] = ids
             fp_ids.flush()
-            os.remove(f"/home/suching/scientific-domains/{file_}")
+            os.remove(file_)
