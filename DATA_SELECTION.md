@@ -71,9 +71,9 @@ python scripts/selection/train_tokenizer.py --input_file world.txt --tokenizer_t
 Tokenize `world.jsonl`, `domain.jsonl`, and `task.josnl` with your trained BPE model:
 
 ```bash
-cat world.txt | pv | parallel --pipe -q python scripts/selection/tokenize.py --tokenizer world.bpe.model --lower  > world.tok
-cat domain.jsonl | pv | parallel --pipe -q python scripts/selection/tokenize.py --tokenizer world.bpe.model --json --lower > domain.tok.jsonl
-cat task.jsonl | pv | parallel --pipe -q python scripts/selection/tokenize.py --tokenizer world.bpe.model --json --lower > task.tok.jsonl
+cat world.txt | pv | parallel --pipe -q python scripts/near_micro/tokenize.py --tokenizer scispacy --lower  > world.tok
+cat domain.jsonl | pv | parallel --pipe -q python scripts/near_micro/tokenize.py --tokenizer scispacy --json --lower > domain.tok.jsonl
+cat task.jsonl | pv | parallel --pipe -q python scripts/near_micro/tokenize.py --tokenizer scispacy --json --lower > task.tok.jsonl
 ```
 
 Split world into train and dev of appropriate sizes, depending on how much you want to train VAMPIRE on.
