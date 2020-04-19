@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES='$({#} - 1)' parallel --ungroup python scripts/run_transformer.py --text {1} --serialization-dir vecs_test/ --vecs-output {1}.out --model roberta -d 0 -b 8 -l 512 ::: hatespeech_shards/*

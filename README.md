@@ -73,7 +73,7 @@ You can download a pretrained model using the `scripts/download_model.py` script
 Just supply a model type and serialization directory, like so:
 
 ```bash
-python -m scripts/download_model \
+python -m scripts.download_model \
         --model allenai/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688 \
         --serialization_dir $(pwd)/pretrained_models/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688
 ```
