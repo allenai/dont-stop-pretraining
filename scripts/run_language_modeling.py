@@ -1,3 +1,5 @@
+### THIS FILE IS COPIED FROM THE HUGGINGFACE REPOSITORY FOR CONVENIENCE.
+
 # coding=utf-8
 # Copyright 2018 The Google AI Language Team Authors and The HuggingFace Inc. team.
 # Copyright (c) 2018, NVIDIA CORPORATION.  All rights reserved.
@@ -13,6 +15,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 """
 Fine-tuning the library models for language modeling on a text file (GPT, GPT-2, BERT, RoBERTa).
 GPT and GPT-2 are fine-tuned using a causal language modeling (CLM) loss while BERT and RoBERTa are fine-tuned
