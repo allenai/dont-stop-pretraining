@@ -11,7 +11,6 @@ Clone vampire (http://github.com/allenai/vampire) at the branch `domains`, and s
 export ROOT_DIR=$(pwd)
 git clone http://github.com/allenai/vampire
 cd vampire
-git checkout wordpiece-tokenization
 export VAMPIRE_DIR=$(pwd)
 cd $ROOT_DIR
 ```
@@ -21,17 +20,23 @@ cd $ROOT_DIR
 Create datasets of domain and task examples. Make sure there is a unique id associated with each example in the datasets, in the column `index`, and a `text` field. We've included example domain and task examples on a public link:
 
 ```bash
-mkdir data_selection
-curl -Lo domain.jsonl https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/examples/domain.jsonl
-curl -Lo task.jsonl https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/examples/task.jsonl
+curl -Lo domain.txt https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/examples/domain.txt
+curl -Lo task.txt https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/examples/task.txt
 ```
 
 If you are working with a text file that doesn't already have indices (or is not not in jsonl format), you can convert it like so:
 
 ```bash
+sort domain.txt | uniq > domain.uniq
 cat domain.uniq | jq  --raw-input .  | jq -rc '{"text": .}'  > domain.jsonl
 jq -rc '. + {"index": input_line_number}' domain.jsonl > domain.index.jsonl 
 mv domain.index.jsonl domain.jsonl
+
+
+sort task.txt | uniq  > task.uniq
+cat task.uniq | jq  --raw-input .  | jq -rc '{"text": .}'  > task.jsonl
+jq -rc '. + {"index": input_line_number}' task.jsonl > task.index.jsonl 
+mv task.index.jsonl task.jsonl
 ```
 <!-- 
 ```bash
@@ -71,9 +76,9 @@ python scripts/selection/train_tokenizer.py --input_file world.txt --tokenizer_t
 Tokenize `world.jsonl`, `domain.jsonl`, and `task.josnl` with your trained BPE model:
 
 ```bash
-cat world.txt | pv | parallel --pipe -q python scripts/near_micro/tokenize.py --tokenizer scispacy --lower  > world.tok
-cat domain.jsonl | pv | parallel --pipe -q python scripts/near_micro/tokenize.py --tokenizer scispacy --json --lower > domain.tok.jsonl
-cat task.jsonl | pv | parallel --pipe -q python scripts/near_micro/tokenize.py --tokenizer scispacy --json --lower > task.tok.jsonl
+cat world.txt | pv | parallel --pipe -q python scripts/tapt_selection/pretokenize.py --tokenizer scispacy --lower  > world.tok
+cat domain.jsonl | pv | parallel --pipe -q python scripts/tapt_selection/pretokenize.py --tokenizer scispacy --json --lower > domain.tok.jsonl
+cat task.jsonl | pv | parallel --pipe -q python scripts/tapt_selection/pretokenize.py --tokenizer scispacy --json --lower > task.tok.jsonl
 ```
 
 Split world into train and dev of appropriate sizes, depending on how much you want to train VAMPIRE on.
@@ -97,8 +102,7 @@ Train vampire on your preprocessed data, following tutorial on VAMPIRE README. Y
 
 ```bash
 export DATA_DIR="$(pwd)/data/world"
-export VOCAB_SIZE=2852 ## this value is printed after data preprocessing in previous step
-export DATASET_SIZE=742500 ## wc -l $ROOT_DIR/world.tok.train
+export VOCAB_SIZE=10000 ## this value is printed after data preprocessing in previous step
 export LAZY=0
 python -m scripts.train --config training_config/vampire.jsonnet  --serialization-dir model_logs/vampire-world --environment VAMPIRE  --device 0  -o
 ```
