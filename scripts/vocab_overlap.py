@@ -8,8 +8,6 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
 import matplotlib
-del matplotlib.font_manager.weight_dict['roman']
-matplotlib.font_manager._rebuild()
 import argparse
 
 
@@ -31,7 +29,7 @@ def load_data(data_path: str) -> List[str]:
 
 def load_vocab(file):
     text = load_data(file)
-    count_vectorizer = CountVectorizer(min_df=3)
+    count_vectorizer = CountVectorizer(min_df=3, stop_words="english")
     count_vectorizer.fit(tqdm(text))
     vocab = set(count_vectorizer.vocabulary_.keys())
     return vocab
@@ -39,8 +37,8 @@ def load_vocab(file):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--files", nargs="+", help="files containing tokenized text from each domain")
-    parser.add_argument("--output_file", help="path to save heatmap")
+    parser.add_argument("--files", nargs="+", help="files containing tokenized text from each domain", required=True)
+    parser.add_argument("--output_file", help="path to save heatmap", required=True)
     args = parser.parse_args()
     files = args.files
     vocabs = {}
@@ -66,29 +64,32 @@ if __name__ == '__main__':
         overlaps[x + "_" + y] = len(intersection) / len(union)
     
     data = []
-    z = {}
-    for key in overlaps.keys():
-        file_1, file_2 = key.split('_')
-        if not z.get(file_1):
-            z[file_1] = {}
-        z[file_1][file_2] = overlaps[key]
-        if not z.get(file_2):
-            z[file_2] = {}
-        z[file_2][file_1] = overlaps[key]
 
-    labels = ["PT", "News", "Reviews", "BioMed", "CS"]
+    with open("overlaps_without_stopwords", "w+") as f:
+        json.dump(overlaps, f)
+z = {}
+for key in overlaps.keys():
+    file_1, file_2 = key.split('_')
+    if not z.get(file_1):
+        z[file_1] = {}
+    z[file_1][file_2] = overlaps[key]
+    if not z.get(file_2):
+        z[file_2] = {}
+    z[file_2][file_1] = overlaps[key]
 
-    for ix, key in enumerate(labels):
-        items = []
-        for subkey in labels:
-            if not z[key].get(subkey):
-                items.append(1.0)
-            else:
-                items.append(z[key][subkey])
-        data.append(items)
-    data = np.array(data) * 100
-    ax = sns.heatmap(data, cmap="Blues", vmin=30, xticklabels=labels, annot=True, fmt=".1f", cbar=False, yticklabels=labels)
-    plt.title("Vocabulary Overlap (%)", y=1.05)
-    plt.yticks(rotation=0) 
-    plt.tight_layout()
-    plt.savefig(args.output_file, dpi=300)
+labels = ["PT", "News", "Reviews", "BioMed", "CS"]
+
+for ix, key in enumerate(labels):
+    items = []
+    for subkey in labels:
+        if not z[key].get(subkey):
+            items.append(1.0)
+        else:
+            items.append(z[key][subkey])
+    data.append(items)
+data = np.array(data) * 100
+ax = sns.heatmap(data, cmap="Blues", vmin=30, xticklabels=labels, annot=True, fmt=".1f", cbar=False, yticklabels=labels)
+plt.yticks(rotation=0)
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.savefig(args.output_file, dpi=300)

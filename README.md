@@ -2,9 +2,21 @@
 Code associated with the Don't Stop Pretraining ACL 2020 paper
 
 
+## Citation
+
+
+```bibtex
+@inproceedings{domains,
+ author = {Suchin Gururangan and Ana Marasović and Swabha Swayamdipta and Kyle Lo and Iz Beltagy and Doug Downey and Noah A. Smith},
+ title = {Don't Stop Pretraining: Adapt Language Models to Domains and Tasks},
+ year = {2020},
+ booktitle = {Proceedings of ACL},
+}
+```
+
 ## Installation
 
-```
+```bash
 conda env create -f environment.yml
 conda activate domains
 ```
@@ -88,20 +100,22 @@ All task data is available on a public S3 url; check `environments/datasets.py`.
 
 The following command will train a RoBERTa classifier on the Citation Intent corpus. Check `environments/datasets.py` for other datasets you can pass to the `--dataset` flag.
 
-```
+```bash
 python -m scripts.train \
         --config training_config/classifier.jsonnet \
-        --serialization_dir model_logs/citation-intent-base \
+        --serialization_dir model_logs/chemprot_reviews \
         --hyperparameters ROBERTA_CLASSIFIER_SMALL \
-        --dataset citation_intent \
-        --model roberta-base \
+        --dataset chemprot \
+        --model allenai/reviews_roberta_base \
         --device 0 \
+        --perf +accuracy
         --evaluate_on_test
+        --x 20389
 ```
 
 You can supply other downloaded models to this script, by providing a path to the model:
 
-```
+```bash
 python -m scripts.train \
         --config training_config/classifier.jsonnet \
         --serialization_dir model_logs/citation-intent-dapt-dapt \
@@ -119,7 +133,8 @@ First, install `allentune`: https://github.com/allenai/allentune
 Modify `search_space/classifier.jsonnet` accordingly.
 
 Then run:
-```
+
+```bash
 allentune search \
             --experiment-name ag_search \
             --num-cpus 56 \
