@@ -6,7 +6,7 @@ Code associated with the Don't Stop Pretraining ACL 2020 paper
 
 
 ```bibtex
-@inproceedings{dontstoppretraining2019,
+@inproceedings{dontstoppretraining2020,
  author = {Suchin Gururangan and Ana Marasović and Swabha Swayamdipta and Kyle Lo and Iz Beltagy and Doug Downey and Noah A. Smith},
  title = {Don't Stop Pretraining: Adapt Language Models to Domains and Tasks},
  year = {2020},
