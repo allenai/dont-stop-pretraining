@@ -103,14 +103,13 @@ The following command will train a RoBERTa classifier on the Citation Intent cor
 ```bash
 python -m scripts.train \
         --config training_config/classifier.jsonnet \
-        --serialization_dir model_logs/chemprot_reviews \
+        --serialization_dir model_logs/citation_intent_base \
         --hyperparameters ROBERTA_CLASSIFIER_SMALL \
-        --dataset chemprot \
-        --model allenai/reviews_roberta_base \
+        --dataset citation_intent \
+        --model roberta-base \
         --device 0 \
-        --perf +accuracy
+        --perf +f1 \
         --evaluate_on_test
-        --x 20389
 ```
 
 You can supply other downloaded models to this script, by providing a path to the model:
@@ -123,6 +122,7 @@ python -m scripts.train \
         --dataset citation_intent \
         --model $(pwd)/pretrained_models/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688 \
         --device 0 \
+        --perf +f1 \
         --evaluate_on_test
 ```
 
