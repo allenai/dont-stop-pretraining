@@ -92,11 +92,22 @@ python -m scripts.download_model \
 
 This will output the `allenai/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688` model for Citation Intent corpus in `$(pwd)/pretrained_models/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688`
 
+
+### Downloading data
+
+All task data is available on a public S3 url; check `environments/datasets.py`.
+
+If you run the `scripts/train.py` command (see next step), we will automatically download the relevant dataset(s) using the URLs in `environments/datasets.py`. However, if you'd like to download the data for use outside of this repository, you will have to `curl` each dataset individually:
+
+```bash
+curl -Lo train.jsonl https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/data/chemprot/train.jsonl
+curl -Lo dev.jsonl https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/data/chemprot/dev.jsonl
+curl -Lo test.jsonl https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/data/chemprot/test.jsonl
+```
+
 ## Example commands
 
 ### Run basic RoBERTa model
-
-All task data is available on a public S3 url; check `environments/datasets.py`.
 
 The following command will train a RoBERTa classifier on the Citation Intent corpus. Check `environments/datasets.py` for other datasets you can pass to the `--dataset` flag.
 
