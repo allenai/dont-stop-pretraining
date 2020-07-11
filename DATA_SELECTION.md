@@ -5,7 +5,7 @@ This README outlines the process of selecting data for TAPT using VAMPIRE (Gurur
 
 ## Setup
 
-Clone vampire (http://github.com/allenai/vampire) at the branch `domains`, and set `ROOT_DIR` and `VAMPIRE_DIR`, since we'll be switching between the directories frequently.
+Clone vampire (http://github.com/allenai/vampire) at the branch `allennlp-1.0`, and set `ROOT_DIR` and `VAMPIRE_DIR`, since we'll be switching between the directories frequently.
 
 ```bash
 export ROOT_DIR=$(pwd)
@@ -38,6 +38,8 @@ cat task.uniq | jq  --raw-input .  | jq -rc '{"text": .}'  > task.jsonl
 jq -rc '. + {"index": input_line_number}' task.jsonl > task.index.jsonl 
 mv task.index.jsonl task.jsonl
 ```
+
+
 <!-- 
 ```bash
 pigz -dc macro.jsonl.gz | pv | parallel --pipe -q jq -rc '.text | gsub("[\\n\\t]"; "")' | parallel --pipe -q awk 'length>3' | parallel --pipe -q jq  --raw-input .  | parallel --pipe -q jq -rc '{"text": .}' | pigz > macro.txt.noshorts.gz
@@ -70,7 +72,7 @@ cat world.jsonl | pv | parallel --pipe -q jq -rc '.text | gsub("[\\n\\t]"; "")' 
 Train a BPE model on the world:
 
 ```bash
-python scripts/selection/train_tokenizer.py --input_file world.txt --tokenizer_type BPE --serialization_dir world.bpe.model --vocab_size 5000
+python scripts/tapt_selection/train_tokenizer.py --input_file world.txt --tokenizer_type BPE --serialization_dir world.bpe.model --vocab_size 5000
 ```
 
 Tokenize `world.jsonl`, `domain.jsonl`, and `task.josnl` with your trained BPE model:
@@ -93,7 +95,7 @@ shuf -n 100000 world.tok > world.tok.dev
 ```bash
 cd $VAMPIRE_DIR
 mkdir data/
-python -m scripts.preprocess_data --train-path $ROOT_DIR/world.tok.train --dev-path $ROOT_DIR/world.tok.dev --serialization-dir ${VAMPIRE_DIR}/data/world
+python -m scripts.preprocess_data --train-path $ROOT_DIR/world.tok.train --dev-path $ROOT_DIR/world.tok.dev --serialization-dir ${VAMPIRE_DIR}/data/world --tfidf --vocab-size 30000
 ```
 
 ## Train VAMPIRE on World
@@ -102,7 +104,7 @@ Train vampire on your preprocessed data, following tutorial on VAMPIRE README. Y
 
 ```bash
 export DATA_DIR="$(pwd)/data/world"
-export VOCAB_SIZE=10000 ## this value is printed after data preprocessing in previous step
+export VOCAB_SIZE=30000 ## this value is printed after data preprocessing in previous step
 export LAZY=0
 python -m scripts.train --config training_config/vampire.jsonnet  --serialization-dir model_logs/vampire-world --environment VAMPIRE  --device 0  -o
 ```
@@ -125,20 +127,33 @@ mkdir domain_emb/
 Extract VAMPIRE embeddings on the domain and and task data using the trained VAMPIRE model from previous step.
 
 ```bash
-parallel --ungroup python -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/task_emb/{1/.} --silent ::: ${ROOT_DIR}/task_shards/*
+parallel --ungroup python -m scripts.tapt_selection.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/task_emb/{1/.} --silent ::: ${ROOT_DIR}/task_shards/*
 
-parallel --ungroup python -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/domain_emb/{1/.} --silent ::: ${ROOT_DIR}/domain_shards/*
+parallel --ungroup python -m scripts.tapt_selection.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/domain_emb/{1/.} --silent ::: ${ROOT_DIR}/domain_shards/*
 ```
 
 ## Run Faiss
 
+First install faiss. If you have a GPU run 
+
+```bash
+pip install faiss-gpu
+```
+
+otherwise run
+
+```bash
+pip install faiss
+```
+
 Run FAISS k-nearest neighbors on the VAMPIRE embeddings to generate a file of near-micro examples from the macro domain.
 
 ```bash
-python ${ROOT_DIR}/scripts/near_micro/convert_pytorch_to_memmap.py "task_emb/*"
-python ${ROOT_DIR}/scripts/near_micro/convert_pytorch_to_memmap.py "domain_emb/*"
+cd ${ROOT_DIR}
+python ${ROOT_DIR}/scripts/tapt_selection/convert_pytorch_to_memmap.py "task_emb/*"
+python ${ROOT_DIR}/scripts/tapt_selection/convert_pytorch_to_memmap.py "domain_emb/*"
 
-python -m scripts.near_micro.build_index --vecs ${ROOT_DIR}/domain_emb/ --text ${ROOT_DIR}/domain.jsonl --dim 64 --serialization_dir domain_index --index_type "Flat" --device 0 --batch-size 64
+python -m scripts.tapt_selection.build_index --vecs ${ROOT_DIR}/domain_emb/ --text ${ROOT_DIR}/domain.jsonl --dim 64 --serialization_dir domain_index --index_type "Flat" --device 0 --batch-size 64
 
-python -m scripts.near_micro.query_index --vecs ${ROOT_DIR}/task_emb/ --text ${ROOT_DIR}/task.jsonl --dim 64 --load-index domain_index --device 0 --batch-size 32 --k 5 --inspect > selected.knn.5
+python -m scripts.tapt_selection.query_index --vecs ${ROOT_DIR}/task_emb/ --text ${ROOT_DIR}/task.jsonl --dim 64 --load-index domain_index --device 0 --batch-size 32 --k 5 --inspect > selected.knn.5
 ```
