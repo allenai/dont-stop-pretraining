@@ -58,7 +58,7 @@ mv cs.macro.index.jsonl cs.macro.jsonl
 Concatenate the domain and task datasets into `world.jsonl`:
 
 ```bash
-cat domain.jsonl task.jsonl | shuf > world.jsonl
+shuf domain.jsonl > world.jsonl
 ```
 
 Extract the text from `world.jsonl` using `parallel` and `jq`:
@@ -67,15 +67,15 @@ Extract the text from `world.jsonl` using `parallel` and `jq`:
 cat world.jsonl | pv | parallel --pipe -q jq -rc '.text | gsub("[\\n\\t]"; "")' > world.txt
 ```
 
-## Train and use tokenizer
+## Tokenize
 
-Train a BPE model on the world:
+<!-- Train a BPE model on the world:
 
 ```bash
 python scripts/tapt_selection/train_tokenizer.py --input_file world.txt --tokenizer_type BPE --serialization_dir world.bpe.model --vocab_size 5000
-```
+``` -->
 
-Tokenize `world.jsonl`, `domain.jsonl`, and `task.josnl` with your trained BPE model:
+Tokenize `world.jsonl`, `domain.jsonl`, and `task.jsonl` with `scispacy` (this is a biomedical domain/dataset -- check `pretokenize.py` for other tokenization options):
 
 ```bash
 cat world.txt | pv | parallel --pipe -q python scripts/tapt_selection/pretokenize.py --tokenizer scispacy --lower  > world.tok
@@ -127,9 +127,9 @@ mkdir domain_emb/
 Extract VAMPIRE embeddings on the domain and and task data using the trained VAMPIRE model from previous step.
 
 ```bash
-parallel --ungroup python -m scripts.tapt_selection.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/task_emb/{1/.} --silent ::: ${ROOT_DIR}/task_shards/*
+parallel --ungroup python -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/task_emb/{1/.} --silent ::: ${ROOT_DIR}/task_shards/*
 
-parallel --ungroup python -m scripts.tapt_selection.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/domain_emb/{1/.} --silent ::: ${ROOT_DIR}/domain_shards/*
+parallel --ungroup python -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/domain_emb/{1/.} --silent ::: ${ROOT_DIR}/domain_shards/*
 ```
 
 ## Run Faiss
