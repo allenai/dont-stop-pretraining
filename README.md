@@ -92,25 +92,35 @@ python -m scripts.download_model \
 
 This will output the `allenai/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688` model for Citation Intent corpus in `$(pwd)/pretrained_models/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688`
 
+
+### Downloading data
+
+All task data is available on a public S3 url; check `environments/datasets.py`.
+
+If you run the `scripts/train.py` command (see next step), we will automatically download the relevant dataset(s) using the URLs in `environments/datasets.py`. However, if you'd like to download the data for use outside of this repository, you will have to `curl` each dataset individually:
+
+```bash
+curl -Lo train.jsonl https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/data/chemprot/train.jsonl
+curl -Lo dev.jsonl https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/data/chemprot/dev.jsonl
+curl -Lo test.jsonl https://allennlp.s3-us-west-2.amazonaws.com/dont_stop_pretraining/data/chemprot/test.jsonl
+```
+
 ## Example commands
 
 ### Run basic RoBERTa model
-
-All task data is available on a public S3 url; check `environments/datasets.py`.
 
 The following command will train a RoBERTa classifier on the Citation Intent corpus. Check `environments/datasets.py` for other datasets you can pass to the `--dataset` flag.
 
 ```bash
 python -m scripts.train \
         --config training_config/classifier.jsonnet \
-        --serialization_dir model_logs/chemprot_reviews \
+        --serialization_dir model_logs/citation_intent_base \
         --hyperparameters ROBERTA_CLASSIFIER_SMALL \
-        --dataset chemprot \
-        --model allenai/reviews_roberta_base \
+        --dataset citation_intent \
+        --model roberta-base \
         --device 0 \
-        --perf +accuracy
+        --perf +f1 \
         --evaluate_on_test
-        --x 20389
 ```
 
 You can supply other downloaded models to this script, by providing a path to the model:
@@ -123,6 +133,7 @@ python -m scripts.train \
         --dataset citation_intent \
         --model $(pwd)/pretrained_models/dsp_roberta_base_dapt_cs_tapt_citation_intent_1688 \
         --device 0 \
+        --perf +f1 \
         --evaluate_on_test
 ```
 
