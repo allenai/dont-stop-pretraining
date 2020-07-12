@@ -158,7 +158,7 @@ cd ${ROOT_DIR}
 python ${ROOT_DIR}/scripts/tapt_selection/convert_pytorch_to_memmap.py "task_emb/*"
 python ${ROOT_DIR}/scripts/tapt_selection/convert_pytorch_to_memmap.py "domain_emb/*"
 
-python -m scripts.tapt_selection.build_index --vecs ${ROOT_DIR}/domain_emb/ --text ${ROOT_DIR}/domain.jsonl --dim 64 --serialization_dir domain_index --index_type "Flat" --device 0 --batch-size 64
+python -m scripts.tapt_selection.build_index --vecs ${ROOT_DIR}/domain_emb/ --text ${ROOT_DIR}/domain.jsonl --dim 81 --serialization_dir domain_index --index_type "Flat" --device 0 --batch-size 64
 
-python -m scripts.tapt_selection.query_index --vecs ${ROOT_DIR}/task_emb/ --text ${ROOT_DIR}/task.jsonl --dim 64 --load-index domain_index --device 0 --batch-size 32 --k 5 --inspect > selected.knn.5
+python -m scripts.tapt_selection.query_index --vecs ${ROOT_DIR}/task_emb/ --text ${ROOT_DIR}/task.jsonl --dim 81 --load-index domain_index --device 0 --batch-size 32 --k 5 --inspect > selected.knn.5
 ```
