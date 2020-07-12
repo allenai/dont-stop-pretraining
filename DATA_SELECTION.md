@@ -15,6 +15,10 @@ export VAMPIRE_DIR=$(pwd)
 cd $ROOT_DIR
 ```
 
+We also use GNU `parallel` in many of these commands. Install `parallel` via 
+
+`sudo apt-get install parallel`
+
 ## Create domain and task datasets
 
 Create datasets of domain and task examples. Make sure there is a unique id associated with each example in the datasets, in the column `index`, and a `text` field. We've included example domain and task examples on a public link:
