@@ -82,9 +82,9 @@ python scripts/tapt_selection/train_tokenizer.py --input_file world.txt --tokeni
 Tokenize `world.jsonl`, `domain.jsonl`, and `task.jsonl` with `scispacy` (this is a biomedical domain/dataset -- check `pretokenize.py` for other tokenization options):
 
 ```bash
-cat world.txt | pv | parallel --pipe -q python scripts/tapt_selection/pretokenize.py --tokenizer scispacy --lower  > world.tok
-cat domain.jsonl | pv | parallel --pipe -q python scripts/tapt_selection/pretokenize.py --tokenizer scispacy --json --lower > domain.tok.jsonl
-cat task.jsonl | pv | parallel --pipe -q python scripts/tapt_selection/pretokenize.py --tokenizer scispacy --json --lower > task.tok.jsonl
+cat world.txt | pv | parallel --pipe -q python scripts/tapt_selection/pretokenize.py --tokenizer scispacy --lower --silent  > world.tok
+cat domain.jsonl | pv | parallel --pipe -q python scripts/tapt_selection/pretokenize.py --tokenizer scispacy --json --lower --silent > domain.tok.jsonl
+cat task.jsonl | pv | parallel --pipe -q python scripts/tapt_selection/pretokenize.py --tokenizer scispacy --json --lower --silent > task.tok.jsonl
 ```
 
 Split world into train and dev of appropriate sizes, depending on how much you want to train VAMPIRE on.
