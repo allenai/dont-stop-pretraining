@@ -58,7 +58,7 @@ mv cs.macro.index.jsonl cs.macro.jsonl
 Concatenate the domain and task datasets into `world.jsonl`:
 
 ```bash
-shuf domain.jsonl > world.jsonl
+cat domain.jsonl task.jsonl | shuf > world.jsonl
 ```
 
 Extract the text from `world.jsonl` using `parallel` and `jq`:
