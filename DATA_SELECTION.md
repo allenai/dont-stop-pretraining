@@ -131,6 +131,7 @@ mkdir domain_emb/
 Extract VAMPIRE embeddings on the domain and and task data using the trained VAMPIRE model from previous step.
 
 ```bash
+cd $VAMPIRE_DIR
 parallel --ungroup python -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/task_emb/{1/.} --silent ::: ${ROOT_DIR}/task_shards/*
 
 parallel --ungroup python -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/domain_emb/{1/.} --silent ::: ${ROOT_DIR}/domain_shards/*
