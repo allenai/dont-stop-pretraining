@@ -124,7 +124,7 @@ mkdir task_shards/
 split --lines 100 --numeric-suffixes task.tok.jsonl task_shards/
 mkdir task_emb/
 mkdir domain_shards/
-split --lines 5000 --numeric-suffixes domain.tok.jsonl domain_shards/
+split --lines 100000 --numeric-suffixes domain.tok.jsonl domain_shards/
 mkdir domain_emb/
 ```
 
