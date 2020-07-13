@@ -134,6 +134,11 @@ Extract VAMPIRE embeddings on the domain and and task data using the trained VAM
 cd $VAMPIRE_DIR
 parallel --ungroup python -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/task_emb/{1/.} --silent ::: ${ROOT_DIR}/task_shards/*
 
+
+# with multi-GPU setup
+parallel --ungroup --jobs=8 python  -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/domain_emb/{1/.}  --cuda-device '$(expr {%} - 1)' ::: ${ROOT_DIR}/domain_shards/*
+
+# with CPU
 parallel --ungroup python -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/domain_emb/{1/.} --silent ::: ${ROOT_DIR}/domain_shards/*
 ```
 
