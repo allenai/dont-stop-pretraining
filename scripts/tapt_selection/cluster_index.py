@@ -3,7 +3,7 @@ import torch
 import glob
 import argparse
 from tqdm import tqdm, trange
-import simplejson as json
+import json
 from itertools import islice
 import numpy as np
 import logging
@@ -11,6 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 import os
 from tempfile import mkdtemp
 import re
+import pandas as pd
 
 
 logging.basicConfig(level=logging.INFO)
@@ -56,11 +57,8 @@ class DomainsDataset(Dataset):
 
 def write_dataset(list_of_json_objects, output_filename):
     with open(output_filename, 'w') as output_file:
-        for key, val in tqdm(list_of_json_objects.items()):
-            out = {"index": key}
-            for i, x in val.items():
-                out[i] = x
-            output_file.write(json.dumps(out) + '\n')
+        for key, val in list_of_json_objects.items():
+            output_file.write(json.dumps({"index": key, "text": val}) + '\n')
 
 
 def read_dataset(file_path:str):
@@ -141,50 +139,80 @@ class Processor:
             batches.append(submat)
         return np.concatenate(batches, 0)
 
+def calculate_accuracy(domain_assignments):
+    preds = []
+    for k, val in domain_assignments.items():
+        if val['pred'] == val['truth']:
+            preds.append(1)
+        else:
+            preds.append(0)
+    preds = np.array(preds)
+    return  (preds == 1).sum() / preds.shape[0]
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--vecs', required=True, type=str)
+    parser.add_argument('--vecs', required=False, type=str)
     parser.add_argument('--dim', required=True, type=int)
-    parser.add_argument('--text', required=True, type=str)
-    parser.add_argument('--serialization_dir', required=True, type=str)
-    parser.add_argument('--index_type', required=False, default="Flat", type=str)
+    parser.add_argument('--text', required=False, type=str)
+    parser.add_argument('--k', type=int, required=False)
+    parser.add_argument('--load-index', required=False, type=str)
+    parser.add_argument('--output-file', required=False, type=str)
     parser.add_argument('--batch-size', required=False, default=64, type=int)
+    parser.add_argument('--inspect', action='store_true')
+    parser.add_argument('--output_neighbor', required=False, type=int)
     parser.add_argument('--device', required=False, default=-1, type=int)
+    parser.add_argument('--df', required=False, type=str)
+    parser.add_argument('--reorder_macro', required=False, type=str)
 
     args = parser.parse_args()
+    
 
-    logger.info("loading vecs...")
-
-    macro_prefixes = list(set([os.path.join(args.vecs, re.findall("\d+", x)[0]) for x in os.listdir(args.vecs)]))
-    macro_processor = Processor(macro_prefixes)
-
-    logger.info("building index...")
     res = faiss.StandardGpuResources()
     co = faiss.GpuClonerOptions()
-    index = faiss.index_factory(args.dim, args.index_type, faiss.METRIC_INNER_PRODUCT)
-    if args.index_type != "Flat":
-        macro_mat_sample = macro_processor.sample_across_mmap_shards(suffix='.emb.npy', sample=1000000)
-        logger.info(f"training...")
-        index.train(macro_mat_sample) # train on a large subset of macro data
-    logger.info("index built!")
-    logger.info("adding all vectors to index...")
-    macro_ids = []
-    for mat_batch, id_batch in macro_processor.iterate_across_mmap_shards(batch_size=args.batch_size):
-        faiss.normalize_L2(mat_batch)
-        index.add(mat_batch)   # add vectors to the index
-        macro_ids.append(id_batch)
-    macro_ids = np.concatenate(macro_ids, axis=0)
+    logger.info(f"loading index at {args.load_index}...")
+    index = faiss.read_index(os.path.join(args.load_index, "faiss.index"))
+    macro_instances = read_dataset(os.path.join(args.load_index, "text.jsonl"))
+    macro_ids = np.load(os.path.join(args.load_index, "ids.npy"))
 
-    macro_instances = read_dataset(args.text)
+    logger.info(f"index loaded!")
 
     if args.device >= 0:
         index = faiss.index_cpu_to_gpu(res, args.device, index, co)
 
-    logger.info(f"saving index to {args.serialization_dir}...")
-    if not os.path.isdir(args.serialization_dir):
-        os.mkdir(args.serialization_dir)
-    faiss.write_index(faiss.index_gpu_to_cpu(index), os.path.join(args.serialization_dir, "faiss.index"))
-    write_dataset(macro_instances,  os.path.join(args.serialization_dir, "text.jsonl"))
-    np.save(os.path.join(args.serialization_dir, "ids.npy"), macro_ids)
-    logger.info("done!")
+    neighbors_ = []
+    dists_ = []
+    micro_ids = []
+    micro_prefixes = list(set([os.path.join(args.vecs, re.findall("\d+", x)[0]) for x in os.listdir(args.vecs)]))
+    micro_processor = Processor(micro_prefixes)
+
+    logger.info('searching for nearest neighbors...')
+    for mat_batch, id_batch in micro_processor.iterate_across_mmap_shards(batch_size=args.batch_size):
+        faiss.normalize_L2(mat_batch)
+        dists, ns = index.search(mat_batch, args.k)
+        neighbors_.append(ns)
+        dists_.append(dists)
+        micro_ids.append(id_batch)
+    micro_ids = np.concatenate(micro_ids, axis=0)
+    neighbors = np.concatenate(neighbors_, axis=0)
+    dists = np.concatenate(dists_, axis=0)
+
+    micro_ids = torch.IntTensor(micro_ids.squeeze(-1))
+    macro_ids = torch.IntTensor(macro_ids.squeeze(-1))
+    
+    micro_instances = read_dataset(args.text)
+    domain_assignments = {}
+
+    for i in range(neighbors.shape[0]):
+        me = micro_ids[i].item()
+        micro_text = micro_instances.get(me)['text']
+        true_domain = micro_instances.get(me)['domain']
+        knn = neighbors[i, :]
+        knn_ids = torch.index_select(macro_ids, index=torch.IntTensor(knn).long(), dim=0).tolist()
+        domains = []
+        for j, kid in enumerate(knn_ids):
+            domains.append(macro_instances.get(kid)['domain'])
+        domain_assignment = max(set(domains), key=domains.count)
+        domain_assignments[micro_text] = {'pred': domain_assignment, 'truth': true_domain}
+    acc = calculate_accuracy(domain_assignments)
+    print (f'Purity: {acc * 100}%')

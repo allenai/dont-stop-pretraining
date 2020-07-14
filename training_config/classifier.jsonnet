@@ -25,6 +25,7 @@ local TRAIN_THROTTLE = std.parseInt(std.extVar("TRAIN_THROTTLE"));
 local GRAD_ACC = std.parseInt(std.extVar("GRAD_ACC_BATCH_SIZE"));
 // skip early stopping? turning this on will prevent dev eval at each epoch.
 local SKIP_EARLY_STOPPING = std.parseInt(std.extVar("SKIP_EARLY_STOPPING")) == 1;
+local SKIP_TRAINING = std.parseInt(std.extVar("SKIP_TRAINING")) == 1;
 local LR_SCHEDULE = std.parseInt(std.extVar("LR_SCHEDULE")) == 1;
 
 
@@ -176,6 +177,7 @@ local CHECKPOINTER = {
         "optimizer": PRETRAINED_ROBERTA_FIELDS(ROBERTA_TRAINABLE)['optimizer'],
         "gradient_accumulation_batch_size": GRAD_ACC,
     } + if SKIP_EARLY_STOPPING then {"checkpointer": CHECKPOINTER} else {"num_serialized_models_to_keep": 0}
+      + if SKIP_TRAINING then {"type": "no_op"} else {}
 }
 
 

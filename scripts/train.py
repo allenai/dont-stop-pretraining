@@ -75,6 +75,9 @@ def main():
     parser.add_argument('--skip_early_stopping',
                         action='store_true',
                         help = "if set, will skip early stopping")
+    parser.add_argument('--skip_training',
+                        action='store_true',
+                        help = "if set, will skip training")
     parser.add_argument('--jackknife',
                         action='store_true',
                         help="if set, will run over jackknife samples")
@@ -106,6 +109,8 @@ def main():
     os.environ['LAZY'] = str(int(args.lazy))
     os.environ['JACKKNIFE'] = str(int(args.jackknife))
     os.environ['SKIP_EARLY_STOPPING'] = str(int(args.skip_early_stopping))
+    os.environ['SKIP_TRAINING'] = str(int(args.skip_training))
+
     os.environ['VALIDATION_METRIC'] = str(args.perf)
 
     allennlp_command = [
