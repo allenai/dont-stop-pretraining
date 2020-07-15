@@ -10,17 +10,10 @@ from tokenizers import SentencePieceBPETokenizer, CharBPETokenizer, ByteLevelBPE
 from transformers import AutoTokenizer, AutoModel
 from itertools import islice
 import torch
-from allennlp.models.archival import load_archive
-from allennlp.predictors import Predictor
 from allennlp.common.util import lazy_groups_of, sanitize
 from typing import List, Iterator, Optional
 from allennlp.common.file_utils import cached_path
-from vampire.vampire.predictors import VampirePredictor
-from vampire.vampire.models import VAMPIRE
-# Now that we've imported the classes, they have been registered, and we can proceed with
-# your original code.
-
-
+from vampire.models import VAMPIRE
 
 def get_json_data(input_file, predictor=None):
         if input_file == "-":
@@ -62,15 +55,12 @@ if __name__ == '__main__':
     vectors = []
     ids = []
     if 'model.tar.gz' in args.model:
-        print('loading archive...')
-        archive = load_archive(args.model, cuda_device=args.device)
-        print('loading predictor...')
-        model = Predictor.from_archive(archive, 'vampire')
+        model = VAMPIRE.from_pretrained(args.model, args.device)
     else:
         model = AutoModel.from_pretrained(args.model)
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
         if args.device >= 0:
             model = model.to(f'cuda:{args.device}')
-        tokenizer = AutoTokenizer.from_pretrained(args.model)
     file_length = 0
     with open(args.input_file, 'r') as f:
         for line in f:
