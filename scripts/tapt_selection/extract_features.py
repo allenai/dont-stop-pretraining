@@ -33,7 +33,6 @@ def get_json_data(input_file, predictor=None):
                     else:
                         yield json.loads(line)
 
-
 def predict_json(predictor, batch_data):
     if len(batch_data) == 1:
         results = [predictor.predict_json(batch_data[0])]
@@ -93,59 +92,3 @@ if __name__ == '__main__':
         indices = torch.IntTensor([x['index'] for x in batch_json]).unsqueeze(-1)
         ids.append(indices)
     torch.save((torch.cat(ids, 0).cpu(), torch.cat(vectors, 0).cpu()), args.output_file)
-    # for batch_json in tqdm(file_iterator, total=file_length // args.batch_size):
-    #     ids_ = [torch.IntTensor([x['index']]).unsqueeze(0) for x in batch_json]
-
-        # if 'tar.gz' in args.model:
-        #     result = predict_json(predictor, batch_json)
-        #     for output in result:
-        #         vector = (torch.Tensor(output['encoder_layer_0']).unsqueeze(0)
-        #                                 + -20 * torch.Tensor(output['encoder_layer_1']).unsqueeze(0)
-        #                                 + torch.Tensor(output['theta']).unsqueeze(0))
-        #         vectors.append(vector)
-        # else:
-        #     lines = [x['text'] for x in batch_json]
-        #     input_ids = tokenizer.batch_encode_plus(lines,
-        #                                             add_special_tokens=tokenizer.add_special_tokens,
-        #                                             truncation=True,
-        #                                             max_length=tokenizer.max_model_input_sizes[args.model],
-        #                                             return_tensors='pt',
-        #                                             padding=True)
-        #     if args.device >= 0:
-        #         input_ids = input_ids.to(model.device)         
-        #     with torch.no_grad():
-        #         out = model(**input_ids)
-        #         vector = out[0][:, 0, :]  # Models outputs are now tuples
-        #     vectors.append(vector)
-        # ids.extend(ids_)
-
-    # with open(args.input_file, 'r') as f:
-    #     while True:
-    #         next_n_lines = list(islice(f, args.batch_size))
-    #         if not next_n_lines:
-    #             break
-    #         else:
-                
-
-    #             # for batch_json in tqdm():
-    #             #     for model_input_json, result in zip(batch_json, self._predict_json(batch_json)):
-    #             #         scalar_mix = (torch.Tensor(result['encoder_layer_0']).unsqueeze(0)
-    #             #                     + -20 * torch.Tensor(result['encoder_layer_1']).unsqueeze(0)
-    #             #                     + torch.Tensor(result['theta']).unsqueeze(0))
-    #             #         vecs.append(scalar_mix)
-    #             #         ids_.append(torch.IntTensor([model_input_json['index']]).unsqueeze(0))
-    #             #         index = index + 1
-
-    #             orig_json = [json.loads(line) for line in next_n_lines if not line.isspace()]
-    #             lines = [x['text'] for x in orig_json]
-    #             id = [x['index'] for x in orig_json]
-    #             input_ids = tokenizer.batch_encode_plus(lines, add_special_tokens=tokenizer.add_special_tokens, truncation=True, max_length=tokenizer.max_model_input_sizes[args.model], return_tensors='pt', padding=True)
-    #             if args.device >= 0:
-    #                 input_ids = input_ids.to(model.device)         
-    #             with torch.no_grad():
-    #                 out = model(**input_ids)
-    #                 vector = out[0][:, 0, :]  # Models outputs are now tuples
-    #             vectors.append(vector)
-    #             ids.append(torch.IntTensor(id))
-    #             pbar.update(1)
-    # torch.save((torch.cat(ids,0).unsqueeze(-1).cpu(), torch.cat(vectors, 0).cpu()), args.output_file)
