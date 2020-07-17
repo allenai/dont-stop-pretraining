@@ -11,6 +11,8 @@ Clone vampire (http://github.com/allenai/vampire) at the branch `allennlp-1.0`, 
 export ROOT_DIR=$(pwd)
 git clone http://github.com/allenai/vampire
 cd vampire
+git checkout allennlp-1.0
+pip install --editable .
 export VAMPIRE_DIR=$(pwd)
 cd $ROOT_DIR
 ```
@@ -59,10 +61,10 @@ mv sciie.micro.index.jsonl sciie.micro.jsonl
 mv cs.macro.index.jsonl cs.macro.jsonl
 ``` -->
 
-Concatenate the domain and task datasets into `world.jsonl`:
+Copy the domain dataset into `world.jsonl`:
 
 ```bash
-cat domain.jsonl task.jsonl | shuf > world.jsonl
+shuf domain.jsonl > world.jsonl
 ```
 
 Extract the text from `world.jsonl` using `parallel` and `jq`:
@@ -99,7 +101,7 @@ shuf -n 100000 world.tok > world.tok.dev
 ```bash
 cd $VAMPIRE_DIR
 mkdir data/
-python -m scripts.preprocess_data --train-path $ROOT_DIR/world.tok.train --dev-path $ROOT_DIR/world.tok.dev --serialization-dir ${VAMPIRE_DIR}/data/world --tfidf --vocab-size 30000
+python -m scripts.preprocess_data --train-path $ROOT_DIR/world.tok.train --dev-path $ROOT_DIR/world.tok.dev --serialization-dir ${VAMPIRE_DIR}/data/world --tfidf --vocab-size 50000
 ```
 
 ## Train VAMPIRE on World
@@ -108,7 +110,7 @@ Train vampire on your preprocessed data, following tutorial on VAMPIRE README. Y
 
 ```bash
 export DATA_DIR="$(pwd)/data/world"
-export VOCAB_SIZE=30000 ## this value is printed after data preprocessing in previous step
+export VOCAB_SIZE=50000 ## this value is printed after data preprocessing in previous step
 export LAZY=0
 python -m scripts.train --config training_config/vampire.jsonnet  --serialization-dir model_logs/vampire-world --environment VAMPIRE  --device 0  -o
 ```
@@ -131,15 +133,14 @@ mkdir domain_emb/
 Extract VAMPIRE embeddings on the domain and and task data using the trained VAMPIRE model from previous step.
 
 ```bash
-cd $VAMPIRE_DIR
-parallel --ungroup python -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/task_emb/{1/.} --silent ::: ${ROOT_DIR}/task_shards/*
+
+# with CPU
+parallel --ungroup  python -m scripts.tapt_selection.extract_features --model ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz --input_file {1} --batch 64 --output_file ${ROOT_DIR}/task_emb/{1/.} --device -1 ::: ${ROOT_DIR}/task_shards/*
 
 
 # with multi-GPU setup
-parallel --ungroup --jobs=8 python  -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/domain_emb/{1/.}  --cuda-device '$(expr {%} - 1)' ::: ${ROOT_DIR}/domain_shards/*
+parallel --ungroup --jobs=6  python -m scripts.tapt_selection.extract_features --model ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz --input_file {1} --batch 64 --output_file ${ROOT_DIR}/domain_emb/{1/.} --device '$(expr {%} - 1)'  ::: ${ROOT_DIR}/domain_shards/*
 
-# with CPU
-parallel --ungroup python -m scripts.run_vampire ${VAMPIRE_DIR}/model_logs/vampire-world/model.tar.gz {1} --batch 64 --include-package vampire --predictor vampire --output-file ${ROOT_DIR}/domain_emb/{1/.} --silent ::: ${ROOT_DIR}/domain_shards/*
 ```
 
 ## Run Faiss
@@ -163,7 +164,7 @@ cd ${ROOT_DIR}
 python ${ROOT_DIR}/scripts/tapt_selection/convert_pytorch_to_memmap.py "task_emb/*"
 python ${ROOT_DIR}/scripts/tapt_selection/convert_pytorch_to_memmap.py "domain_emb/*"
 
-python -m scripts.tapt_selection.build_index --vecs ${ROOT_DIR}/domain_emb/ --text ${ROOT_DIR}/domain.jsonl --dim 81 --serialization_dir domain_index --index_type "Flat" --device 0 --batch-size 64
+srun -w allennlp-server4 --gpus=1 python -m scripts.tapt_selection.build_index --vecs ${ROOT_DIR}/domain_emb/ --text ${ROOT_DIR}/domain.jsonl --dim 81 --serialization_dir domain_index --index_type "Flat" --device 0 --batch-size 64
 
-python -m scripts.tapt_selection.query_index --vecs ${ROOT_DIR}/task_emb/ --text ${ROOT_DIR}/task.jsonl --dim 81 --load-index domain_index --device 0 --batch-size 32 --k 5 --inspect > selected.knn.5
+srun -w allennlp-server4 --gpus=1 python -m scripts.tapt_selection.query_index --vecs ${ROOT_DIR}/task_emb/ --text ${ROOT_DIR}/task.jsonl --dim 81 --load-index domain_index --device 0 --batch-size 32 --k 5 --inspect > selected.knn.5
 ```
