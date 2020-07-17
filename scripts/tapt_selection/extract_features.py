@@ -13,7 +13,7 @@ import torch
 from allennlp.common.util import lazy_groups_of, sanitize
 from typing import List, Iterator, Optional
 from allennlp.common.file_utils import cached_path
-from vampire.models import VAMPIRE
+from vampire.api import VampireModel
 
 def get_json_data(input_file, predictor=None):
     if input_file == "-":
@@ -35,12 +35,12 @@ def get_json_data(input_file, predictor=None):
 
 
 def predict_json(predictor, batch_data):
-        if len(batch_data) == 1:
-            results = [predictor.predict_json(batch_data[0])]
-        else:
-            results = predictor.predict_batch_json(batch_data)
-        for output in results:
-            yield output
+    if len(batch_data) == 1:
+        results = [predictor.predict_json(batch_data[0])]
+    else:
+        results = predictor.predict_batch_json(batch_data)
+    for output in results:
+        yield output
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -54,7 +54,7 @@ if __name__ == '__main__':
     vectors = []
     ids = []
     if 'model.tar.gz' in args.model:
-        model = VAMPIRE.from_pretrained(args.model, args.device, for_prediction=True)
+        model = VampireModel.from_pretrained(args.model, args.device, for_prediction=True)
     else:
         model = AutoModel.from_pretrained(args.model)
         tokenizer = AutoTokenizer.from_pretrained(args.model)
@@ -69,31 +69,30 @@ if __name__ == '__main__':
         predictor = model
     else:
         predictor = None
-    file_iterator = lazy_groups_of(get_json_data(args.input_file, predictor=predictor), args.batch_size)
+    file_iterator = lazy_groups_of(get_json_data(args.input_file, predictor=predictor.model), args.batch_size)
     
     for batch_json in tqdm(file_iterator, total=file_length // args.batch_size):
-            for model_input_json, result in zip(batch_json, predict_json(predictor, batch_json)):
-                if 'tar.gz' in args.model:
-                    vector = (torch.Tensor(result['encoder_layer_0']).unsqueeze(0)
-                                    + -20 * torch.Tensor(result['encoder_layer_1']).unsqueeze(0)
-                                    + torch.Tensor(result['theta']).unsqueeze(0))
-                    
-                else:
-                    lines = [x['text'] for x in model_input_json]
-                    input_ids = tokenizer.batch_encode_plus(lines,
-                                                            add_special_tokens=tokenizer.add_special_tokens,
-                                                            truncation=True,
-                                                            max_length=tokenizer.max_model_input_sizes[args.model],
-                                                            return_tensors='pt',
-                                                            padding=True)
-                    if args.device >= 0:
-                        input_ids = input_ids.to(model.device)         
-                    with torch.no_grad():
-                        out = model(**input_ids)
-                        vector = out[0][:, 0, :]  # Models outputs are now tuples
+        if 'tar.gz' in args.model:
+            batch_vectors = predictor.predict(batch_json, batch=True, scalar_mix=True)
+            for vector in batch_vectors:
                 vectors.append(vector)
-                ids.append(torch.IntTensor([model_input_json['index']]).unsqueeze(0))
-    torch.save((torch.cat(ids,0).cpu(), torch.cat(vectors, 0).cpu()), args.output_file)
+        else:
+            lines = [x['text'] for x in batch_json]
+            input_ids = tokenizer.batch_encode_plus(lines,
+                                                    add_special_tokens=tokenizer.add_special_tokens,
+                                                    truncation=True,
+                                                    max_length=tokenizer.max_model_input_sizes[args.model],
+                                                    return_tensors='pt',
+                                                    padding=True)
+            if args.device >= 0:
+                input_ids = input_ids.to(model.device)         
+            with torch.no_grad():
+                out = model(**input_ids)
+                vectors_ = out[0][:, 0, :]  # Models outputs are now tuples
+            vectors.extend(vectors_)
+        indices = torch.IntTensor([x['index'] for x in batch_json]).unsqueeze(-1)
+        ids.append(indices)
+    torch.save((torch.cat(ids, 0).cpu(), torch.cat(vectors, 0).cpu()), args.output_file)
     # for batch_json in tqdm(file_iterator, total=file_length // args.batch_size):
     #     ids_ = [torch.IntTensor([x['index']]).unsqueeze(0) for x in batch_json]
 
