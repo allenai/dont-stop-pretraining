@@ -1,19 +1,17 @@
-import sys
-import os
 import argparse
 import json
-from tqdm import tqdm
-import spacy
-import scispacy
-from spacy.tokenizer import Tokenizer
-from tokenizers import SentencePieceBPETokenizer, CharBPETokenizer, ByteLevelBPETokenizer, BertWordPieceTokenizer
-from transformers import AutoTokenizer, AutoModel
-from itertools import islice
+import os
+import sys
+from typing import Iterator
+
 import torch
-from allennlp.common.util import lazy_groups_of, sanitize
-from typing import List, Iterator, Optional
 from allennlp.common.file_utils import cached_path
+from allennlp.common.util import lazy_groups_of
+from tqdm import tqdm
+from transformers import AutoModel, AutoTokenizer
+
 from vampire.api import VampireModel
+
 
 def get_json_data(input_file, predictor=None):
     if input_file == "-":
@@ -43,8 +41,11 @@ def predict_json(predictor, batch_data):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, required=True, help="path to vampire model archive (e.g. /path/to/model.tar.gz)"
-                                                                 " or huggingface model name (e.g. roberta-base) ")
+    parser.add_argument("--model",
+                        type=str,
+                        required=True,
+                        help="path to vampire model archive (e.g. /path/to/model.tar.gz)"
+                             " or huggingface model name (e.g. roberta-base) ")
     parser.add_argument("--output_file", type=str, required=True, help='path to output')
     parser.add_argument("--input_file", type=str, required=True, help='path to output')
     parser.add_argument('--batch_size', type=int, required=False, default=64)
@@ -69,11 +70,15 @@ if __name__ == '__main__':
         predictor = model.model
     else:
         predictor = None
-    file_iterator = lazy_groups_of(get_json_data(args.input_file, predictor=predictor), args.batch_size)
+    file_iterator = lazy_groups_of(get_json_data(args.input_file,
+                                                 predictor=predictor),
+                                   args.batch_size)
     
     for batch_json in tqdm(file_iterator, total=file_length // args.batch_size):
         if 'tar.gz' in args.model:
-            batch_vectors = model.extract_features(batch_json, batch=True, scalar_mix=True)
+            batch_vectors = model.extract_features(batch_json,
+                                                   batch=True,
+                                                   scalar_mix=True)
             for vector in batch_vectors:
                 vectors.append(vector)
         else:
