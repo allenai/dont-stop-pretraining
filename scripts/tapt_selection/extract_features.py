@@ -73,7 +73,7 @@ if __name__ == '__main__':
     
     for batch_json in tqdm(file_iterator, total=file_length // args.batch_size):
         if 'tar.gz' in args.model:
-            batch_vectors = predictor.extract_features(batch_json, batch=True, scalar_mix=True)
+            batch_vectors = model.extract_features(batch_json, batch=True, scalar_mix=True)
             for vector in batch_vectors:
                 vectors.append(vector)
         else:
