@@ -652,6 +652,7 @@ def main():
 		type=str,
 		help='Name of file for master task'
 	)
+	parser.add_argument("--lm_mt_task_weight", type=float, default=None)
 	parser.add_argument("--classf_warmup_frac", type=float, default=0.06)
 	parser.add_argument("--classf_ft_epochs", type=int, default=10)
 	parser.add_argument("--classf_betas", type=str, default="(0.9,0.98)")
@@ -790,7 +791,8 @@ def main():
 									pca_every=args.pca_every, num_basis=args.num_basis, num_samples_for_basis=args.num_samples_for_basis,
 									eta_set=eval(args.eta_set), num_subspace_decomp_layers=args.n_subspace_layers,
 									dropout=args.classifier_dropout, test_task_file=args.test_task_file, dev_task_file=args.dev_task_file,
-									save_path = os.path.join(args.output_dir, 'grad_surgery_model.pth')
+									save_path = os.path.join(args.output_dir, 'grad_surgery_model.pth'),
+									multitask_weight=args.lm_mt_task_weight
 			)
 	# Also need to modify the args to the initializer of the class
 	model.to(args.device)

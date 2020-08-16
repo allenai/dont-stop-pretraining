@@ -57,7 +57,8 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 					dev_task_file=None,
 					max_norm=1.0,
 					classf_train_batch_sz=256,
-					save_path=None
+					save_path=None,
+					multitask_weight=None
 	):
 		# Todo [ldery] - allow for us to evaluate on the test set so we get a sense of the performance !!
 		assert save_path is not None, 'Invalid Save Path Provided for Classifier Head'
@@ -84,6 +85,7 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 		self.model_name = model_name
 		self.classf_train_batch_sz = classf_train_batch_sz
 		self.classf_ft_batch_sz = 256 # Todo [ldery] - don't hardcode stuff
+		self.multitask_weight = multitask_weight
 
 	def set_optim(self, optimizer, scheduler):
 		# Do this to set the optimizer
@@ -227,7 +229,7 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 			return result
 		return fn
 
-	def classifier_sample_grad(self, set_classifier_grad=True):
+	def classifier_sample_grad(self, set_classifier_grad=True, set_lm_grad=False, lm_grad_weight=0.0):
 		sent_dict, labels = self.get_classifier_samples(self.subspace_nsamples)
 		output_dict = self.classifier(sent_dict, labels)
 		loss = output_dict['loss']
@@ -246,6 +248,12 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 				p_.grad = torch.zeros_like(p_)
 			p_.grad.data.add_(grad)
 		subspace_grads = grads[:n_subspace]
+		if set_lm_grad:
+			# Setting the transformer layer grads - during multitasking
+			for grad, p_ in zip(subspace_grads, self.subspace_param_list):
+				if p_.grad is None:
+					p_.grad = torch.zeros_like(p_)
+				p_.grad.data.add_(grad * lm_grad_weight)
 		_, grad_vec = vectorize(subspace_grads)
 		return grad_vec
 
@@ -402,17 +410,26 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 		for name, p in zip(self.subspace_decomp_layers, self.subspace_param_list):
 			set_attr(self.classifier, name.split("."), p)
 		return ortho_basis
+	
+	def do_multitask_backward(self):
+		num_iters = self.classf_train_batch_sz // self.subspace_nsamples
+		rand_classifier_grad = None
+		for i in range(num_iters):  # We are doing gradient accumulation for a better gradient estimate
+			self.classifier_sample_grad(set_classifier_grad=True, set_lm_grad=True, lm_grad_weight=self.multitask_weight)
 
 	def set_surrogate_gradient(self, max_grad_norm=None):
 		lm_grad_vec = self.get_subspace_layer_grads()
 		self.pca_cntr += 1
 		should_optimize_classifier = False
-		if (self.pca_every == self.pca_cntr) or (not hasattr(self, 'ortho_basis')):
-			self.pca_cntr = 0
-			should_optimize_classifier = True
-			self.ortho_basis = self.rand_sample_ortho_grad_basis()
-		projected_grad = self.get_projgrad(lm_grad_vec, self.ortho_basis)
-		self.set_subspace_layer_grads(projected_grad)
+		if self.multitask_weight is not None: # We are doing some sort of multitasking
+			self.do_multitask_backward()
+		else:
+			if (self.pca_every == self.pca_cntr) or (not hasattr(self, 'ortho_basis')):
+				self.pca_cntr = 0
+				should_optimize_classifier = True
+				self.ortho_basis = self.rand_sample_ortho_grad_basis()
+			projected_grad = self.get_projgrad(lm_grad_vec, self.ortho_basis)
+			self.set_subspace_layer_grads(projected_grad)
 		if should_optimize_classifier:
 			for k, v in self.classifier.named_parameters():
 				if '_text_field_embedder' not in k:
