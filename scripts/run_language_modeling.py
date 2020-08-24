@@ -423,7 +423,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 			logger.info(print_out)
 		logger.info('Now Saving the Classifier Model')
 		classifier_dev_perfs.append(dev_metrics['f1'])
-		if len(classifier_dev_perfs) > args.classf_patience:
+		if len(classifier_dev_perfs) > args.classf_pretr_patience:
 			max_ = max(classifier_dev_perfs)
 			recent_max = max(classifier_dev_perfs[-args.classf_pretr_patience:])
 			if recent_max < max_:
@@ -658,6 +658,7 @@ def main():
 	parser.add_argument("--classf_betas", type=str, default="(0.9,0.98)")
 	parser.add_argument("--classf_wd", type=float, default=0.1)
 	parser.add_argument("--classf_patience", type=int, default=3)
+	parser.add_argument("--classf_max_seq_len", type=int, default=512)
 	parser.add_argument("--classf_pretr_patience", type=int, default=5)
 	parser.add_argument("--classf_lr", type=float, default=2e-5, help="Learning rate of classifier")
 	parser.add_argument("--pca_every", type=int, default=10, help='How frequently to estimate the subspace')
@@ -689,7 +690,7 @@ def main():
 			raise ValueError("Used --should_continue but no checkpoint was found in --output_dir.")
 		else:
 			args.model_name_or_path = sorted_checkpoints[-1]
-
+			print('Used Should Continue and model found is : ', args.model_name_or_path)
 	if (
 		os.path.exists(args.output_dir)
 		and os.listdir(args.output_dir)
@@ -792,7 +793,7 @@ def main():
 									eta_set=eval(args.eta_set), num_subspace_decomp_layers=args.n_subspace_layers,
 									dropout=args.classifier_dropout, test_task_file=args.test_task_file, dev_task_file=args.dev_task_file,
 									save_path = os.path.join(args.output_dir, 'grad_surgery_model.pth'),
-									multitask_weight=args.lm_mt_task_weight
+									multitask_weight=args.lm_mt_task_weight, max_seq_len=args.classf_max_seq_len
 			)
 	# Also need to modify the args to the initializer of the class
 	model.to(args.device)
