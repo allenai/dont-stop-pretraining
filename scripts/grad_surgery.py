@@ -9,6 +9,7 @@ import numpy as np
 from transformers import (
 	AutoModelWithLMHead,
 )
+import nvidia_smi
 import sys
 PATH="/home/ldery/internship/dsp/dont_stop_pretraining"
 # PATH="/home/jupyter/projects/dsp/dont_stop_pretraining"
@@ -19,10 +20,20 @@ from modules.seq2vec_encoders.cls_pooler import CLSPooler
 PATH="/home/ldery/internship/meta4da/algorithms"
 sys.path.insert(1, PATH)
 from utils import *
-
+import pdb
 
 # Object for grad weights
 GradWeights = namedtuple('GradWeights', 'eta_tilde eta_pos eta_neg')
+
+# Setting up gpu usage monitoring
+nvidia_smi.nvmlInit()
+gpu_handle = nvidia_smi.nvmlDeviceGetHandleByIndex(torch.cuda.current_device())
+
+
+def print_gpu_stats():
+	mem_res = nvidia_smi.nvmlDeviceGetMemoryInfo(gpu_handle)
+	print('Gpu mem: {} (GiB)'.format(mem_res.used / (1024**2)))  # usage in GiB
+	print('Gpu used: {} %'.format(100 * (mem_res.used / mem_res.total)))
 
 
 class ModelWithGradSurgery(AutoModelWithLMHead):
@@ -68,7 +79,7 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 										eta_neg=eta_set[2]
 									)
 		self.subspace_nsamples = num_samples_for_basis  # Assuming this is set to max-out memory
-		self.samples_per_batch = self.subspace_nsamples
+		self.samples_per_batch = self.subspace_nsamples // 2
 		self.num_subspace_basis = num_basis
 		self.max_norm = 1.0
 		self.max_seq_len = max_seq_len
@@ -235,7 +246,7 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 				rounds_cntr += 1
 				if rounds_cntr == grad_accum_steps:
 					rounds_cntr = 0
-					clip_grad_norm_(self.classifier.parameters(), self.max_grad_norm)
+					clip_grad_norm_(self.classifier.parameters(), self.max_norm)
 					self.optimizer.step()
 					self.optimizer.zero_grad()
 			train_metrics = self.classifier.get_metrics(reset=True)
@@ -373,7 +384,7 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 		for i in range(num_iters):  # We are doing gradient accumulation for a better gradient estimate
 			self.classifier_sample_grad(set_classifier_grad=True, set_lm_grad=True, lm_grad_weight=self.multitask_weight)
 
-	def get_projgrad(self, grad_vec, ortho_basi, mt_weighting=0.0):
+	def get_projgrad(self, grad_vec, ortho_basis, mt_weighting=0.0):
 		# Get the low-rank approx grad for classifier task
 		num_iters = self.classf_train_batch_sz // self.samples_per_batch
 		classf_grad_weight = (1.0 if mt_weighting == 0 else mt_weighting) / num_iters
@@ -399,8 +410,7 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 			# Calculate the new gradient
 			new_grads = out_span_grad * self.g_weights.eta_tilde
 			new_grads = new_grads + (in_span_grad_pos * self.g_weights.eta_pos) + (in_span_grad_neg * self.g_weights.eta_neg)
-
-			new_grads = new_grads + (mt_weighting * rand_classifier_grad)
+			new_grads = new_grads + (mt_weighting * rand_classifier_grad.squeeze())
 		return new_grads
 
 	def rand_sample_ortho_grad_basis(self):
@@ -437,28 +447,23 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 		return ortho_basis
 
 	def set_surrogate_gradient(self, max_grad_norm=None):
-		# Need to check the last value of self.should_optimize_classifier
-		# If it's last value was True, then it means that we optimized it and so we need to
-		# zero-out those gradients
-		if hasattr(self, 'should_optimize_classifier') and self.should_optimize_classifier:
-			for k, v in self.classifier.named_parameters():
-				if '_text_field_embedder' not in k:
-					if p_.grad is not None:
-						p_.grad = None
-
+		# print('GPU Stats before Doing Alignment')
+		# print_gpu_stats()
 		lm_grad_vec = self.get_subspace_layer_grads()
 		self.pca_cntr += 1
-		self.should_optimize_classifier = False
+		should_optimize_classifier = False
 		if (self.pca_every == self.pca_cntr) or (not hasattr(self, 'ortho_basis')):
 			self.pca_cntr = 0
-			self.should_optimize_classifier = True
+			should_optimize_classifier = True
 			self.ortho_basis = self.rand_sample_ortho_grad_basis()
 		mt_weighting = self.multitask_weight if self.multitask_weight is not None else 0.0
 		projected_grad = self.get_projgrad(lm_grad_vec, self.ortho_basis, mt_weighting=mt_weighting)
 		self.set_subspace_layer_grads(projected_grad)
-		if self.should_optimize_classifier:
+		if should_optimize_classifier:
 			for k, v in self.classifier.named_parameters():
 				if '_text_field_embedder' not in k:
 					assert v.grad is not None, 'Param - {} has no gradient'.format(k)
 					clip_grad_norm_(v.grad, self.max_norm)
+		# print('Gpu stats after Doing Alignment')
+		# print_gpu_stats()
 		return should_optimize_classifier

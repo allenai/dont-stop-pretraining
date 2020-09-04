@@ -665,7 +665,7 @@ def main():
 	parser.add_argument("--classf_wd", type=float, default=0.1)
 	parser.add_argument("--base_wd", type=float, default=0.01)
 	parser.add_argument("--classf_patience", type=int, default=3)
-	parser.add_argument("--classf_max_seq_len", type=int, default=512)
+	parser.add_argument("--classf_max_seq_len", type=int, default=384)
 	parser.add_argument("--classf_pretr_patience", type=int, default=10)
 	parser.add_argument("--classf_lr", type=float, default=2e-5, help="Learning rate of classifier")
 	parser.add_argument("--pca_every", type=int, default=10, help='How frequently to estimate the subspace')
