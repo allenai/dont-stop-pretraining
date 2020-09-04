@@ -1,5 +1,5 @@
 import torch
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from torch.nn.utils import clip_grad_norm_
 from allennlp.data.token_indexers.pretrained_transformer_indexer import PretrainedTransformerIndexer
 from allennlp.data.tokenizers.pretrained_transformer_tokenizer import PretrainedTransformerTokenizer
@@ -10,7 +10,8 @@ from transformers import (
 	AutoModelWithLMHead,
 )
 import sys
-PATH="/home/jupyter/projects/dsp/dont_stop_pretraining"
+PATH="/home/ldery/internship/dsp/dont_stop_pretraining"
+# PATH="/home/jupyter/projects/dsp/dont_stop_pretraining"
 sys.path.insert(1, PATH)
 from models import BasicClassifierWithF1
 from data.dataset_readers.text_classification_json_reader_with_sampling import TextClassificationJsonReaderWithSampling
@@ -24,7 +25,6 @@ from utils import *
 GradWeights = namedtuple('GradWeights', 'eta_tilde eta_pos eta_neg')
 
 
-# Todo [ldery] - do a correct check before running this fully
 class ModelWithGradSurgery(AutoModelWithLMHead):
 	''' Wrapper around a basic model so we can do gradient surgery on the model'''
 	def __init__(
@@ -67,7 +67,8 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 										eta_tilde=eta_set[0], eta_pos=eta_set[1],
 										eta_neg=eta_set[2]
 									)
-		self.subspace_nsamples = num_samples_for_basis
+		self.subspace_nsamples = num_samples_for_basis  # Assuming this is set to max-out memory
+		self.samples_per_batch = self.subspace_nsamples
 		self.num_subspace_basis = num_basis
 		self.max_norm = 1.0
 		self.max_seq_len = max_seq_len
@@ -185,6 +186,8 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 		self.base_lm_model = self.classifier._text_field_embedder
 
 	def get_ft_steps(self, num_epochs):
+		# [NB] I am using self.subspace_nsamples as a proxy for the instantaneous batch size
+		# Since self.subspace_nsamples is chosen to max out gpu
 		grad_accum_steps = self.classf_ft_batch_sz // self.subspace_nsamples
 		return len(self.dataset['tokens']) // grad_accum_steps * num_epochs
 
@@ -219,13 +222,15 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 		self.classifier.train()
 		self.perfs = defaultdict(lambda: defaultdict(list))
 		dev_metrics = self.evaluate_classifier(set_='dev')
-		logger.info('Metrics before Training : ' + str(dev_metrics))
+		logger.info('About to start finetuning model')
+		logger.info('Metrics before Finetuning : ' + str(dev_metrics))
 		for iter_ in range(max_ft_steps):
 			rounds_cntr = 0
-			# Todo [ldery] - figure out what the hell I was doing here
-			grad_accum_steps = self.classf_ft_batch_sz // self.subspace_nsamples
+			# [NB] I am using self.subspace_nsamples as a proxy for the instantaneous batch size
+			# Since self.subspace_nsamples is chosen to max out gpu
+			grad_accum_steps = self.classf_ft_batch_sz // self.samples_per_batch
 			for samples in self.dataset_iterator(self.dataset, shuffle=True):
-				loss = self.classifier(*samples)['loss']
+				loss = self.classifier(*samples)['loss'] / grad_accum_steps
 				loss.backward()
 				rounds_cntr += 1
 				if rounds_cntr == grad_accum_steps:
@@ -274,14 +279,13 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 
 	def dataset_iterator(self, dataset, shuffle=False):
 		total_egs = len(dataset['tokens'])
-		samples_per_batch = self.subspace_nsamples // 2
-		num_batches = total_egs // samples_per_batch
+		num_batches = total_egs // self.samples_per_batch
 		if shuffle:
 			idxs = np.random.permutation(total_egs)
 		else:
 			idxs = list(range(total_egs))
 		for i in range(num_batches):
-			this_idxs = idxs[(i * samples_per_batch) : ((i + 1) * samples_per_batch)]
+			this_idxs = idxs[(i * self.samples_per_batch): ((i + 1) * self.samples_per_batch)]
 			sentences = [dataset['tokens'][id_] for id_ in this_idxs]
 			labels = dataset['labels'][this_idxs]
 			sentences = collate(sentences, dataset['pad_idx'])
@@ -289,41 +293,14 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 			labels = torch.IntTensor(labels).to(self.subspace_param_list[0].device)
 			yield sentences, labels
 
+	# Make our model functional w.r.t the subspace_decomp_layers
 	def functional_(self, data_tuple):
 		def fn(*params):
 			for name, p in zip(self.subspace_decomp_layers, params):
 				set_attr(self.classifier, name.split("."), p)
-			result =  self.classifier(*data_tuple)['loss_full']
+			result = self.classifier(*data_tuple)['loss_full']
 			return result
 		return fn
-
-	def classifier_sample_grad(self, set_classifier_grad=True, set_lm_grad=False, lm_grad_weight=0.0):
-		sent_dict, labels = self.get_classifier_samples(self.subspace_nsamples)
-		output_dict = self.classifier(sent_dict, labels)
-		loss = output_dict['loss']
-		params_w_grads_to_gather = []
-		params_w_grads_to_gather.extend(self.subspace_param_list)
-		names = list(self.subspace_decomp_layers)
-		for k, v in self.classifier.named_parameters():
-			if '_text_field_embedder' not in k:
-				params_w_grads_to_gather.append(v)
-				names.append(k)
-		grads = torch.autograd.grad(loss, params_w_grads_to_gather, allow_unused=True)
-		n_subspace = len(self.subspace_param_list)
-		for grad, p_ in zip(grads[n_subspace:], params_w_grads_to_gather[n_subspace:]):
-			# Set the gradients of the classifer components here
-			if p_.grad is None:
-				p_.grad = torch.zeros_like(p_)
-			p_.grad.data.add_(grad)
-		subspace_grads = grads[:n_subspace]
-		if set_lm_grad:
-			# Setting the transformer layer grads - during multitasking
-			for grad, p_ in zip(subspace_grads, self.subspace_param_list):
-				if p_.grad is None:
-					p_.grad = torch.zeros_like(p_)
-				p_.grad.data.add_(grad * lm_grad_weight)
-		_, grad_vec = vectorize(subspace_grads)
-		return grad_vec
 
 	def make_functional(self):
 		class_ = list(self.classifier.named_parameters())
@@ -352,21 +329,57 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 			for name, p_ in self.base_lm_model.named_parameters():
 				if self.is_subspace_layer(name):
 					if p_.grad is None:
-						print('Encountered a param with None gradient')
-						pdb.set_trace()
+						raise ValueError('Encountered a param with None gradient')
 					assert p_.grad is not None, 'Cannot do subspace decomp on layer with no grad'
 					numel = p_.grad.numel()
-					to_copy = grad_vec[cur_pos : (cur_pos + numel)].view(p_.grad.shape)
+					to_copy = grad_vec[cur_pos: (cur_pos + numel)].view(p_.grad.shape)
 					p_.grad.data.copy_(to_copy)
 					cur_pos += numel
 		assert cur_pos == grad_vec.shape[0], 'Not all parameters were used up. Something is wrong'
 
-	def get_projgrad(self, grad_vec, ortho_basis):
+	def classifier_sample_grad(
+				self, set_classifier_grad=True, set_lm_grad=False, classf_grad_weight=1.0, lm_grad_weight=0.0
+			):
+		sent_dict, labels = self.get_classifier_samples(self.samples_per_batch)
+		output_dict = self.classifier(sent_dict, labels)
+		loss = output_dict['loss']
+		params_w_grads_to_gather = []
+		params_w_grads_to_gather.extend(self.subspace_param_list)
+		names = list(self.subspace_decomp_layers)
+		n_subspace = len(self.subspace_param_list)
+		if set_classifier_grad:
+			for k, v in self.classifier.named_parameters():
+				if '_text_field_embedder' not in k:
+					params_w_grads_to_gather.append(v)
+					names.append(k)
+			grads = torch.autograd.grad(loss, params_w_grads_to_gather, allow_unused=True)
+			for grad, p_ in zip(grads[n_subspace:], params_w_grads_to_gather[n_subspace:]):
+				# Set the gradients of the classifer components here
+				if p_.grad is None:
+					p_.grad = torch.zeros_like(p_)
+				p_.grad.data.add_(grad * classf_grad_weight)
+		subspace_grads = grads[:n_subspace]
+		if set_lm_grad:
+			# Setting the transformer layer grads - during multitasking
+			for grad, p_ in zip(subspace_grads, self.subspace_param_list):
+				if p_.grad is None:
+					p_.grad = torch.zeros_like(p_)
+				p_.grad.data.add_(grad * lm_grad_weight)
+		_, grad_vec = vectorize(subspace_grads)
+		return grad_vec
+
+	def do_multitask_backward(self):
+		num_iters = self.classf_train_batch_sz // self.samples_per_batch
+		for i in range(num_iters):  # We are doing gradient accumulation for a better gradient estimate
+			self.classifier_sample_grad(set_classifier_grad=True, set_lm_grad=True, lm_grad_weight=self.multitask_weight)
+
+	def get_projgrad(self, grad_vec, ortho_basi, mt_weighting=0.0):
 		# Get the low-rank approx grad for classifier task
-		num_iters = self.classf_train_batch_sz // self.subspace_nsamples
+		num_iters = self.classf_train_batch_sz // self.samples_per_batch
+		classf_grad_weight = (1.0 if mt_weighting == 0 else mt_weighting) / num_iters
 		rand_classifier_grad = None
 		for i in range(num_iters):  # We are doing gradient accumulation for a better gradient estimate
-			this_grad = self.classifier_sample_grad(set_classifier_grad=True).unsqueeze(0)
+			this_grad = self.classifier_sample_grad(set_classifier_grad=True, classf_grad_weight=classf_grad_weight).unsqueeze(0)
 			with torch.no_grad():
 				if rand_classifier_grad is None:
 					rand_classifier_grad = this_grad / num_iters
@@ -387,51 +400,63 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 			new_grads = out_span_grad * self.g_weights.eta_tilde
 			new_grads = new_grads + (in_span_grad_pos * self.g_weights.eta_pos) + (in_span_grad_neg * self.g_weights.eta_neg)
 
+			new_grads = new_grads + (mt_weighting * rand_classifier_grad)
 		return new_grads
 
 	def rand_sample_ortho_grad_basis(self):
-		proj_mat = torch.normal(mean=0.0, std=1.0, size=(self.subspace_nsamples, self.num_subspace_basis), device=self.subspace_param_list[0].device)
+		proj_mat = torch.normal(
+									mean=0.0, std=1.0, size=(self.subspace_nsamples, self.num_subspace_basis),
+									device=self.subspace_param_list[0].device
+								)
 		# We may use a subset of the reference set
 		base_set = self.get_classifier_samples(self.subspace_nsamples)
 		prod_ = []
+		# Turn off dropout for better estimate of subspace
+		for name, child in self.classifier.named_modules():
+			if 'dropout' in name:
+				child.eval()
 		for i in range(self.num_subspace_basis):
 			v_ = proj_mat[:, i]
 			# emptying cache to pre-empt memory issues. Might want to wrap in a try-catch-block
 			torch.cuda.empty_cache()
 			self.make_functional()
 			out = torch.autograd.functional.vjp(self.functional_(base_set), self.subspace_param_list, strict=True, v=v_)
-			# [Maybe !] Need to filter out the gradients corrresponding to only the layers we care about
 			prod_.append(vectorize(out[1])[1].unsqueeze(1))
+		# Turn dropout back on
+		for name, child in self.classifier.named_modules():
+			if 'dropout' in name:
+				child.train()
 		with torch.no_grad():
 			prod_ = torch.cat(prod_, dim=1)
 			# My implementation of qr turned out to be faster
 			# Seems the torch version makes underlying api calls which take time.
-			ortho_basis = my_gramschmidt(prod_.t())
-		# Now undo harm from making the model functional w.r.t chosen params : 
+			ortho_basis = my_qr(prod_.t())
+		# Now undo harm from making the model functional w.r.t chosen params :
 		for name, p in zip(self.subspace_decomp_layers, self.subspace_param_list):
 			set_attr(self.classifier, name.split("."), p)
 		return ortho_basis
-	
-	def do_multitask_backward(self):
-		num_iters = self.classf_train_batch_sz // self.subspace_nsamples
-		rand_classifier_grad = None
-		for i in range(num_iters):  # We are doing gradient accumulation for a better gradient estimate
-			self.classifier_sample_grad(set_classifier_grad=True, set_lm_grad=True, lm_grad_weight=self.multitask_weight)
 
 	def set_surrogate_gradient(self, max_grad_norm=None):
+		# Need to check the last value of self.should_optimize_classifier
+		# If it's last value was True, then it means that we optimized it and so we need to
+		# zero-out those gradients
+		if hasattr(self, 'should_optimize_classifier') and self.should_optimize_classifier:
+			for k, v in self.classifier.named_parameters():
+				if '_text_field_embedder' not in k:
+					if p_.grad is not None:
+						p_.grad = None
+
 		lm_grad_vec = self.get_subspace_layer_grads()
 		self.pca_cntr += 1
-		should_optimize_classifier = False
-		if self.multitask_weight is not None: # We are doing some sort of multitasking
-			self.do_multitask_backward()
-		else:
-			if (self.pca_every == self.pca_cntr) or (not hasattr(self, 'ortho_basis')):
-				self.pca_cntr = 0
-				should_optimize_classifier = True
-				self.ortho_basis = self.rand_sample_ortho_grad_basis()
-			projected_grad = self.get_projgrad(lm_grad_vec, self.ortho_basis)
-			self.set_subspace_layer_grads(projected_grad)
-		if should_optimize_classifier:
+		self.should_optimize_classifier = False
+		if (self.pca_every == self.pca_cntr) or (not hasattr(self, 'ortho_basis')):
+			self.pca_cntr = 0
+			self.should_optimize_classifier = True
+			self.ortho_basis = self.rand_sample_ortho_grad_basis()
+		mt_weighting = self.multitask_weight if self.multitask_weight is not None else 0.0
+		projected_grad = self.get_projgrad(lm_grad_vec, self.ortho_basis, mt_weighting=mt_weighting)
+		self.set_subspace_layer_grads(projected_grad)
+		if self.should_optimize_classifier:
 			for k, v in self.classifier.named_parameters():
 				if '_text_field_embedder' not in k:
 					assert v.grad is not None, 'Param - {} has no gradient'.format(k)

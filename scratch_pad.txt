@@ -23,3 +23,14 @@ CUDA_VISIBLE_DEVICES=1 python -u -m scripts.run_language_modeling --train_data_f
 
 
 CUDA_VISIBLE_DEVICES=1 python -u -m scripts.run_language_modeling --train_data_file datasets/amazon/train.txt --line_by_line  --model_type roberta-base --tokenizer_name roberta-base --mlm --per_gpu_train_batch_size 4 --gradient_accumulation_steps 512 --model_name_or_path roberta-base --eval_data_file datasets/imdb_data/dev.txt  --do_eval  --evaluate_during_training  --do_train --num_train_epochs 100 --learning_rate 0.0005 --logging_steps 1000 --base_task_dataset_file datasets/imdb_data/train.jsonl --dev_task_file datasets/imdb_data/dev.jsonl --test_task_file datasets/imdb_data/test.jsonl --num_samples_for_basis 10  --num_basis 5 --overwrite_output_dir --pca_every 1 --n_subspace_layers -6 --eta_set "(1.0, 1.0, -1.0)" --classifier_dropout 0.2 --output_dir roberta-transfer_amazon_imdb-tapt_1.1.-1_repro_paper_config --classf_lr 1e-4 --classf_max_seq_len 384 --classf_pretr_patience 50 --should_continue &> run_outputs/transfer_amazon_to_imdb-tapt_1.1.-1_repro_paper_config_continuing_again.txt
+
+
+
+
+TIR CLUSTER RUN SETUP
+
+python -u -m scripts.run_language_modeling --train_data_file datasets/amazon/train.small.txt --line_by_line  --model_type roberta-base --tokenizer_name roberta-base --mlm --per_gpu_train_batch_size 8 --gradient_accumulation_steps 256 --model_name_or_path roberta-base --eval_data_file datasets/amazon/dev.small.txt  --do_eval  --evaluate_during_training  --do_train --num_train_epochs 100 --learning_rate 0.0005 --logging_steps 2000 --base_task_dataset_file datasets/amazon/train.jsonl --dev_task_file datasets/amazon/dev.small.jsonl --test_task_file datasets/amazon/test.small.jsonl --num_samples_for_basis 32  --num_basis 5 --overwrite_output_dir --pca_every 1 --n_subspace_layers -6 --eta_set "(1.0, 1.0, -1.0)" --classifier_dropout 0.2 --classf_lr 1e-4 --output_dir roberta-amazon-tapt_1.1.-1_repro_paper_config
+
+
+
+python -u -m scripts.run_language_modeling --train_data_file datasets/amazon/train.small.txt --line_by_line  --model_type roberta-base --tokenizer_name roberta-base --mlm --per_gpu_train_batch_size 8 --gradient_accumulation_steps 256 --model_name_or_path roberta-base --eval_data_file datasets/amazon/dev.small.txt  --do_eval  --evaluate_during_training  --do_train --num_train_epochs 1 --learning_rate 0.0005 --logging_steps 2000 --base_task_dataset_file datasets/amazon/train.jsonl --dev_task_file datasets/amazon/dev.small.jsonl --test_task_file datasets/amazon/test.small.jsonl --num_samples_for_basis 32  --num_basis 5 --overwrite_output_dir --pca_every 1 --n_subspace_layers -6 --eta_set "(1.0, 1.0, -1.0)" --classifier_dropout 0.2 --classf_lr 1e-4 --output_dir output_models/test_
