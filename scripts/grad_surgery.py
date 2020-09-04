@@ -1,21 +1,10 @@
-# Todo [ldery]
-# 1. setup optimizer for the classifier
-# 2. setup dev/test set for the classifier to monitor its performance
-# 3. setup saving of the model for reproducibility
-
 import torch
 from collections import defaultdict
-from torch.nn.utils.rnn import pad_sequence
 from torch.nn.utils import clip_grad_norm_
 from allennlp.data.token_indexers.pretrained_transformer_indexer import PretrainedTransformerIndexer
 from allennlp.data.tokenizers.pretrained_transformer_tokenizer import PretrainedTransformerTokenizer
 from allennlp.modules import FeedForward
 from allennlp.data import Vocabulary
-import time
-from tqdm import tqdm
-from allennlp.nn.activations import Activation
-from collections import defaultdict, namedtuple
-from .grad_surgery_utils import *
 import numpy as np
 from transformers import (
 	AutoModelWithLMHead,
@@ -26,14 +15,14 @@ sys.path.insert(1, PATH)
 from models import BasicClassifierWithF1
 from data.dataset_readers.text_classification_json_reader_with_sampling import TextClassificationJsonReaderWithSampling
 from modules.seq2vec_encoders.cls_pooler import CLSPooler
-import pdb
+PATH="/home/ldery/internship/meta4da/algorithms"
+sys.path.insert(1, PATH)
+from utils import *
+
 
 # Object for grad weights
 GradWeights = namedtuple('GradWeights', 'eta_tilde eta_pos eta_neg')
 
-# For collating data
-def collate(examples, pad_token_id):
-	return pad_sequence(examples, batch_first=True, padding_value=pad_token_id)
 
 # Todo [ldery] - do a correct check before running this fully
 class ModelWithGradSurgery(AutoModelWithLMHead):
@@ -43,6 +32,7 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 					model_name,
 					base_lm_model,
 					base_task_dataset_file,
+					step_frequency=1,
 					max_seq_len=512,
 					pca_every=10,
 					num_basis=10,
@@ -52,7 +42,7 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 					embedding_dim=768,
 					ff_multiplier=1,
 					num_layers=1,
-					num_subspace_decomp_layers=-2, # negative means we take the last n layers
+					num_subspace_decomp_layers=-2,  # negative means we take the last n layers
 					test_task_file=None,
 					dev_task_file=None,
 					max_norm=1.0,
@@ -60,7 +50,6 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 					save_path=None,
 					multitask_weight=None
 	):
-		# Todo [ldery] - allow for us to evaluate on the test set so we get a sense of the performance !!
 		assert save_path is not None, 'Invalid Save Path Provided for Classifier Head'
 		self.save_path = save_path
 		self.base_lm_model = base_lm_model
@@ -84,14 +73,92 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 		self.max_seq_len = max_seq_len
 		self.model_name = model_name
 		self.classf_train_batch_sz = classf_train_batch_sz
-		self.classf_ft_batch_sz = 256 # Todo [ldery] - don't hardcode stuff
+		self.classf_ft_batch_sz = classf_train_batch_sz
 		self.multitask_weight = multitask_weight
+
+	def setup_dataset(self, base_task_dataset_file, model_name, max_seq_len, label_vocab=None, lazy=False):
+		# Instantiate dataset reader
+		indexers = {'tokens': PretrainedTransformerIndexer(model_name, do_lowercase=False)}
+		tokenizer = PretrainedTransformerTokenizer(model_name, do_lowercase=False, start_tokens=["<s>"], end_tokens=["</s>"])
+		dataset_reader = TextClassificationJsonReaderWithSampling(
+							token_indexers=indexers, tokenizer=tokenizer,
+							max_sequence_length=max_seq_len, lazy=lazy
+						)
+		# Read from the dataset
+		all_samples = dataset_reader._read(base_task_dataset_file)
+		pretrain_vocab = tokenizer._tokenizer.encoder
+		all_sentences, all_instances = [], []
+		for instance in all_samples:
+			tokens = instance.fields['tokens']
+			tokens.index(pretrain_vocab)
+			sentence = tokens.as_tensor(tokens.get_padding_lengths())['tokens']
+			all_sentences.append(sentence)
+			all_instances.append(instance)
+		if label_vocab is not None:
+			vocab = label_vocab
+		else:
+			vocab = Vocabulary.from_instances(all_instances)
+		all_labels = []
+		for instance in all_instances:
+			label = instance.fields['label']
+			label.index(vocab)
+			this_label = label.as_tensor(label.get_padding_lengths())
+			all_labels.append(this_label)
+		return {
+					'tokens': all_sentences,
+					'labels': np.array(all_labels),
+					'pad_idx': tokenizer._tokenizer.pad_token_id,
+					'vocab': vocab
+				}
+
+	def get_subspace_layers(self, num_layers):
+		all_layer_names = []
+		for k, _ in self.classifier.named_parameters():
+			all_layer_names.append(k)
+		layer_nums, layer_names = [], defaultdict(list)
+		for id_ in all_layer_names:
+			attrs = id_.split('.')
+			if 'layer' in attrs:
+				idx = attrs.index('layer')
+				layer_nums.append(int(attrs[idx + 1]))
+				layer_names[int(attrs[idx + 1])].append(id_)
+		sorted_layers = sorted(list(set(layer_nums)))
+		if num_layers < 0:
+			chosen = sorted_layers[num_layers:]
+		else:
+			chosen = sorted_layers[:num_layers]
+		return [y for x in chosen for y in layer_names[x]]
+
+	def is_subspace_layer(self, layer_name):
+		for k in self.subspace_decomp_layers:
+			if layer_name in k:
+				return True
+		return False
+
+	def setup_classifier(self, dropout, embedding_dim, num_layers, ff_multiplier):
+		vocab = self.dataset['vocab']
+		text_field_embedder = self.base_lm_model
+		seq2vec_encoder = CLSPooler(embedding_dim)
+		hidden_dim = embedding_dim * ff_multiplier
+		feedforward = FeedForward(
+									embedding_dim, num_layers, hidden_dims=hidden_dim,
+									activations=torch.nn.Tanh(), dropout=dropout
+								)
+		return BasicClassifierWithF1(vocab, text_field_embedder, seq2vec_encoder, feedforward, dropout=dropout)
+
+	def to(self, device):
+		self.base_lm_model.to(device)
+		self.classifier.to(device)
+		# Since we have moved this to gpu, we need to re-set the base.
+		self.classifier._text_field_embedder = self.base_lm_model
+		# the tensors have been moved so use those
+		self.subspace_param_list = tuple([v for k, v in self.classifier.named_parameters() if self.is_subspace_layer(k)])
 
 	def set_optim(self, optimizer, scheduler):
 		# Do this to set the optimizer
 		self.optimizer = optimizer
 		self.ft_lr_scheduler = scheduler
-		
+
 	def save(self):
 		path = self.save_path
 		torch.save(
@@ -105,10 +172,10 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 									'test': self.test_task_file,
 								},
 				'decomp_layers': self.subspace_decomp_layers,
-				'perfs': dict(self.perfs) if hasattr(self, 'perfs') else None
-			}
-		, path)
-	
+				'perfs': dict(self.perfs) if hasattr(self, 'perfs') else None},
+			path
+		)
+
 	def load(self):
 		state_dict = torch.load(self.save_path)
 		self.classifier.load_state_dict(state_dict['classifier_sd'])
@@ -116,20 +183,46 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 			self.optimizer.load_state_dict(state_dict['optimizer_sd'])
 			self.ft_lr_scheduler = state_dict['scheduler']
 		self.base_lm_model = self.classifier._text_field_embedder
-	
+
 	def get_ft_steps(self, num_epochs):
 		grad_accum_steps = self.classf_ft_batch_sz // self.subspace_nsamples
 		return len(self.dataset['tokens']) // grad_accum_steps * num_epochs
+
+	def evaluate_classifier(self, set_='dev'):
+		assert set_ in ['dev', 'test'], 'Wrong dataset specified'
+		dataset = None
+		if set_ == 'dev':
+			if self.dev_dataset is None:
+				self.dev_dataset = self.setup_dataset(
+										self.dev_task_file, self.model_name, self.max_seq_len,
+										label_vocab=self.dataset['vocab']
+									)
+			dataset = self.dev_dataset
+		else:
+			if self.test_dataset is None:
+				self.test_dataset = self.setup_dataset(
+										self.test_task_file, self.model_name, self.max_seq_len,
+										label_vocab=self.dataset['vocab']
+									)
+			dataset = self.test_dataset
+		self.classifier.eval()
+		# Run the classifier
+		for samples in self.dataset_iterator(dataset):
+			_ = self.classifier(*samples)
+		self.classifier.train()
+		# Get the metrics from the classifier
+		return self.classifier.get_metrics(reset=True)
 
 	def do_finetuning(self, max_ft_steps, logger, patience=3):
 		assert self.optimizer is not None, 'Optimizer not given for finetuning'
 		# Create the ft scheduler here
 		self.classifier.train()
-		self.perfs = defaultdict(lambda : defaultdict(list))
+		self.perfs = defaultdict(lambda: defaultdict(list))
 		dev_metrics = self.evaluate_classifier(set_='dev')
-		print('Metrics before Training : ', dev_metrics)
+		logger.info('Metrics before Training : ' + str(dev_metrics))
 		for iter_ in range(max_ft_steps):
 			rounds_cntr = 0
+			# Todo [ldery] - figure out what the hell I was doing here
 			grad_accum_steps = self.classf_ft_batch_sz // self.subspace_nsamples
 			for samples in self.dataset_iterator(self.dataset, shuffle=True):
 				loss = self.classifier(*samples)['loss']
@@ -137,13 +230,15 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 				rounds_cntr += 1
 				if rounds_cntr == grad_accum_steps:
 					rounds_cntr = 0
+					clip_grad_norm_(self.classifier.parameters(), self.max_grad_norm)
 					self.optimizer.step()
 					self.optimizer.zero_grad()
 			train_metrics = self.classifier.get_metrics(reset=True)
 			dev_metrics = self.evaluate_classifier(set_='dev')
 			test_metrics = self.evaluate_classifier(set_='test')
 			for k, v in train_metrics.items():
-				print_out = "Epoch : {} | {} | Train : {:.3f} | Dev Set : {:.3f} | Test Set : {:.3f}".format(iter_, k, v, dev_metrics[k], test_metrics[k])
+				info = iter_, k, v, dev_metrics[k], test_metrics[k]
+				print_out = "Epoch : {} | {} | Train : {:.3f} | Dev Set : {:.3f} | Test Set : {:.3f}".format(*info)
 				logger.info(print_out)
 				self.perfs['train'][k].append(v)
 				self.perfs['test'][k].append(test_metrics[k])
@@ -165,10 +260,8 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 				break
 			else:
 				self.save()
-# 		Loading the saved model :) 
-# 		let us load from the path that we saved
 		self.load()
-		print('Done Finetuning Our Model')
+		logger.info('Done Finetuning Our Model')
 
 	def get_classifier_samples(self, nsamples):
 		num_egs = len(self.dataset['tokens'])
@@ -195,31 +288,6 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 			sentences = sentences.to(self.subspace_param_list[0].device)
 			labels = torch.IntTensor(labels).to(self.subspace_param_list[0].device)
 			yield sentences, labels
-
-	def evaluate_classifier(self, set_='dev'):
-		assert set_ in ['dev', 'test'], 'Wrong dataset specified'
-		dataset = None
-		if set_ == 'dev':
-			if self.dev_dataset is None:
-				self.dev_dataset = self.setup_dataset(self.dev_task_file, self.model_name, self.max_seq_len, label_vocab=self.dataset['vocab'])
-			dataset = self.dev_dataset
-		else:
-			if self.test_dataset is None:
-				self.test_dataset = self.setup_dataset(self.test_task_file, self.model_name, self.max_seq_len, label_vocab=self.dataset['vocab'])
-			dataset = self.test_dataset
-		self.classifier.eval()
-		for samples in self.dataset_iterator(dataset):
-			_ = self.classifier(*samples)
-		self.classifier.train()
-		return self.classifier.get_metrics(reset=True)
-
-	def to(self, device):
-		self.base_lm_model.to(device)
-		self.classifier.to(device)
-		# Since we have moved this to gpu, we need to re-set the base.
-		self.classifier._text_field_embedder = self.base_lm_model
-		# the tensors have been moved so use those
-		self.subspace_param_list = tuple([v for k, v in self.classifier.named_parameters() if self.is_subspace_layer(k)])
 
 	def functional_(self, data_tuple):
 		def fn(*params):
@@ -257,14 +325,6 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 		_, grad_vec = vectorize(subspace_grads)
 		return grad_vec
 
-	def setup_classifier(self, dropout, embedding_dim, num_layers, ff_multiplier):
-		vocab = self.dataset['vocab']
-		text_field_embedder = self.base_lm_model
-		seq2vec_encoder = CLSPooler(embedding_dim)
-		hidden_dim = embedding_dim * ff_multiplier
-		feedforward = FeedForward(embedding_dim, num_layers, hidden_dims=hidden_dim, activations=torch.nn.Tanh(), dropout=dropout)
-		return BasicClassifierWithF1(vocab, text_field_embedder, seq2vec_encoder, feedforward, dropout=dropout)
-
 	def make_functional(self):
 		class_ = list(self.classifier.named_parameters())
 		for name, p in class_:
@@ -276,65 +336,6 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 	# Hack this models forward pass to respond to the lm forward pass
 	def forward(*args, **kwargs):
 		return self.base_lm_model(*args, **kwargs)
-
-	def is_subspace_layer(self, layer_name):
-		for k in self.subspace_decomp_layers:
-			if layer_name in k:
-				return True
-		return False
-
-	def get_subspace_layers(self, num_layers):
-		all_layer_names = []
-		for k, _ in self.classifier.named_parameters():
-			all_layer_names.append(k)
-		layer_nums, layer_names = [], defaultdict(list)
-		for id_ in all_layer_names:
-			attrs = id_.split('.')
-			if 'layer' in attrs:
-				idx = attrs.index('layer')
-				layer_nums.append(int(attrs[idx + 1]))
-				layer_names[int(attrs[idx + 1])].append(id_)
-		sorted_layers = sorted(list(set(layer_nums)))
-		if num_layers < 0:
-			chosen = sorted_layers[num_layers:]
-		else:
-			chosen = sorted_layers[:num_layers]
-		return [y for x in chosen for y in layer_names[x] ]
-
-	def setup_dataset(self, base_task_dataset_file, model_name, max_seq_len, label_vocab=None, lazy=False):
-		# Instantiate dataset reader
-		indexers = {'tokens': PretrainedTransformerIndexer(model_name, do_lowercase=False)}
-		tokenizer = PretrainedTransformerTokenizer(model_name, do_lowercase=False, start_tokens=["<s>"], end_tokens=["</s>"])
-		dataset_reader = TextClassificationJsonReaderWithSampling(
-							token_indexers=indexers, tokenizer=tokenizer,
-							max_sequence_length=max_seq_len, lazy=lazy
-						)
-		# Read from the dataset
-		all_samples = dataset_reader._read(base_task_dataset_file)
-		pretrain_vocab = tokenizer._tokenizer.encoder
-		all_sentences, all_instances = [], []
-		for instance in all_samples:
-			tokens = instance.fields['tokens']
-			tokens.index(pretrain_vocab)
-			sentence = tokens.as_tensor(tokens.get_padding_lengths())['tokens']
-			all_sentences.append(sentence)
-			all_instances.append(instance)
-		if label_vocab is not None:
-			vocab = label_vocab
-		else:
-			vocab = Vocabulary.from_instances(all_instances)
-		all_labels = []
-		for instance in all_instances:
-			label = instance.fields['label']
-			label.index(vocab)
-			this_label = label.as_tensor(label.get_padding_lengths())
-			all_labels.append(this_label)
-		return {
-					'tokens': all_sentences, 
-					'labels': np.array(all_labels),
-					'pad_idx': tokenizer._tokenizer.pad_token_id,
-					'vocab': vocab
-				}
 
 	def get_subspace_layer_grads(self):
 		grad_vec = []
@@ -436,5 +437,3 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 					assert v.grad is not None, 'Param - {} has no gradient'.format(k)
 					clip_grad_norm_(v.grad, self.max_norm)
 		return should_optimize_classifier
-
-

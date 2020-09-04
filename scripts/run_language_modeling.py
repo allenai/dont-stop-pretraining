@@ -91,7 +91,7 @@ class TextDataset(Dataset):
 			tokenized_text = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(text))
 
 			for i in range(0, len(tokenized_text) - block_size + 1, block_size):  # Truncate in block of block_size
-				self.examples.append(tokenizer.build_inputs_with_special_tokens(tokenized_text[i : i + block_size]))
+				self.examples.append(tokenizer.build_inputs_with_special_tokens(tokenized_text[i: i + block_size]))
 			# Note that we are loosing the last truncated example here for the sake of simplicity (no padding)
 			# If your dataset is small, first you should loook for a bigger one :-) and second you
 			# can change this behavior by adding (model specific) padding.
@@ -184,11 +184,13 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> T
 
 	if tokenizer.mask_token is None:
 		raise ValueError(
-			"This tokenizer does not have a mask token which is necessary for masked language modeling. Remove the --mlm flag if you want to use this tokenizer."
+			"This tokenizer does not have a mask token which is necessary for masked"
+			" language modeling. Remove the --mlm flag if you want to use this tokenizer."
 		)
 
 	labels = inputs.clone()
-	# We sample a few tokens in each sequence for masked-LM training (with probability args.mlm_probability defaults to 0.15 in Bert/RoBERTa)
+	# We sample a few tokens in each sequence for masked-LM training
+	# (with probability args.mlm_probability defaults to 0.15 in Bert/RoBERTa)
 	probability_matrix = torch.full(labels.shape, args.mlm_probability)
 	special_tokens_mask = [
 		tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in labels.tolist()
@@ -198,7 +200,7 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> T
 		padding_mask = labels.eq(tokenizer.pad_token_id)
 		probability_matrix.masked_fill_(padding_mask, value=0.0)
 	masked_indices = torch.bernoulli(probability_matrix).bool()
-	labels[~masked_indices] = -100	# We only compute loss on masked tokens
+	labels[~masked_indices] = -100  # We only compute loss on masked tokens
 
 	# 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
 	indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
@@ -213,7 +215,9 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> T
 	return inputs, labels
 
 
-def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, grad_surgery_model: ModelWithGradSurgery = None) -> Tuple[int, float]:
+def train(
+			args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer,
+			grad_surgery_model: ModelWithGradSurgery = None) -> Tuple[int, float]:
 	""" Train the model """
 	if args.local_rank in [-1, 0]:
 		tb_writer = SummaryWriter()
@@ -248,20 +252,29 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 		},
 		{"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
 	]
-
-	optimizer = AdamW(optimizer_grouped_parameters, betas=eval(args.classf_betas), lr=args.learning_rate, eps=args.adam_epsilon)
+	# Begin change by [ldery]
+	# Setup the optimizer for the base model
+	optimizer = AdamW(
+						optimizer_grouped_parameters, betas=eval(args.classf_betas),
+						lr=args.learning_rate, eps=args.adam_epsilon, weight_decay=args.base_wd
+					)
 	scheduler = get_linear_schedule_with_warmup(
-		optimizer, num_warmup_steps=int(args.classf_warmup_frac*t_total), num_training_steps=t_total
+		optimizer, num_warmup_steps=int(args.classf_warmup_frac * t_total), num_training_steps=t_total
 	)
-	
-	classf_total = t_total // args.pca_every  # Change this
+
+	# Setup an optimizer for the classifier
+	classf_total = t_total // args.classf_step_freq
 	classifier_params = list(grad_surgery_model.classifier._feedforward_layer.parameters())
 	classifier_params.extend(grad_surgery_model.classifier._classification_layer.parameters())
 	classifier_params.extend(grad_surgery_model.classifier._seq2vec_encoder.parameters())
-	classifier_optim = AdamW(classifier_params, betas=eval(args.classf_betas), weight_decay=args.classf_wd, lr=args.classf_lr)
+	classifier_optim = AdamW(
+								classifier_params, betas=eval(args.classf_betas),
+								weight_decay=args.classf_wd, lr=args.classf_lr
+							)
 	classifier_scheduler = get_linear_schedule_with_warmup(
-		classifier_optim, num_warmup_steps=int(args.classf_warmup_frac*classf_total), num_training_steps=classf_total
+		classifier_optim, num_warmup_steps=int(args.classf_warmup_frac * classf_total), num_training_steps=classf_total
 	)
+	# End change by [ldery]
 
 	# Check if saved optimizer or scheduler states exist
 	if (
@@ -289,7 +302,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 		model = torch.nn.parallel.DistributedDataParallel(
 			model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True
 		)
-	
+
 	# Setup an optimizer for the grad surgery model classifier
 
 	# Train!
@@ -331,7 +344,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 	train_iterator = trange(
 		epochs_trained, int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0]
 	)
-	set_seed(args)	# Added here for reproducibility
+	set_seed(args)  # Added here for reproducibility
 	classifier_dev_perfs = []
 	for epoch in train_iterator:
 		epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
@@ -353,7 +366,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 			loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 
 			if args.n_gpu > 1:
-				loss = loss.mean()	# mean() to average on multi-gpu parallel training
+				loss = loss.mean()  # mean() to average on multi-gpu parallel training
 			if args.gradient_accumulation_steps > 1:
 				loss = loss / args.gradient_accumulation_steps
 
@@ -371,6 +384,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 				# Begin change by [ldery]
 				shld_step_classifier = grad_surgery_model.set_surrogate_gradient(max_grad_norm=args.max_grad_norm)
 				if shld_step_classifier:
+					# Todo [ldery] - think about this some more. We can accumulate gradient
 					classifier_optim.step()
 					classifier_scheduler.step()
 					classifier_optim.zero_grad()
@@ -384,7 +398,7 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 					# Log metrics
 					if (
 						args.local_rank == -1 and args.evaluate_during_training
-					):	# Only evaluate when single GPU otherwise metrics may not average well
+					):  # Only evaluate when single GPU otherwise metrics may not average well
 						results = evaluate(args, model, tokenizer)
 						for key, value in results.items():
 							tb_writer.add_scalar("eval_{}".format(key), value, global_step)
@@ -414,12 +428,12 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 			if args.max_steps > 0 and global_step > args.max_steps:
 				epoch_iterator.close()
 				break
-		# Print the stats : 
+		# Epoch has ended. We print the statistics of the classifier to measure progress
 		train_metrics = grad_surgery_model.classifier.get_metrics(reset=True)
 		dev_metrics = grad_surgery_model.evaluate_classifier(set_='dev')
 		test_metrics = grad_surgery_model.evaluate_classifier(set_='test')
 		for k, v in train_metrics.items():
-			print_out = "Train : {} | Dev Set : {} | Test Set : {}".format(v, dev_metrics[k], test_metrics[k])
+			print_out = "[{}] | Train : {} | Dev Set : {} | Test Set : {}".format(k, v, dev_metrics[k], test_metrics[k])
 			logger.info(print_out)
 		logger.info('Now Saving the Classifier Model')
 		classifier_dev_perfs.append(dev_metrics['f1'])
@@ -432,8 +446,6 @@ def train(args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedToke
 				break
 			else:
 				grad_surgery_model.save()
-		else:
-			grad_surgery_model.save()
 		if args.max_steps > 0 and global_step > args.max_steps:
 			train_iterator.close()
 			break
@@ -509,14 +521,6 @@ def main():
 	parser.add_argument(
 		"--train_data_file", default=None, type=str, required=True, help="The input training data file (a text file)."
 	)
-	
-# 	parser.add_argument(
-# 		"--master_task_data_file", default=None, type=str, required=True, help="The input training data file for the task we"
-# 		"want to use to guide the language modelling training"
-# 	)
-# 	parser.add_argument(
-# 		"--master_task_name", default=None, type=str, required=True, help="The task that we want to use to guide the language model training"
-# 	)
 	parser.add_argument(
 		"--output_dir",
 		type=str,
@@ -652,23 +656,35 @@ def main():
 		type=str,
 		help='Name of file for master task'
 	)
+
+	# Begin Change [ldery]
 	parser.add_argument("--lm_mt_task_weight", type=float, default=None)
 	parser.add_argument("--classf_warmup_frac", type=float, default=0.06)
 	parser.add_argument("--classf_ft_epochs", type=int, default=10)
 	parser.add_argument("--classf_betas", type=str, default="(0.9,0.98)")
 	parser.add_argument("--classf_wd", type=float, default=0.1)
+	parser.add_argument("--base_wd", type=float, default=0.01)
 	parser.add_argument("--classf_patience", type=int, default=3)
 	parser.add_argument("--classf_max_seq_len", type=int, default=512)
-	parser.add_argument("--classf_pretr_patience", type=int, default=5)
+	parser.add_argument("--classf_pretr_patience", type=int, default=10)
 	parser.add_argument("--classf_lr", type=float, default=2e-5, help="Learning rate of classifier")
 	parser.add_argument("--pca_every", type=int, default=10, help='How frequently to estimate the subspace')
 	parser.add_argument("--num_basis", type=int, default=10, help='Size of the subspace to estimate')
-	parser.add_argument("--num_samples_for_basis", type=int, default=64, help='Number of samples for estimating the subspace')
+	parser.add_argument(
+							"--num_samples_for_basis", type=int, default=64,
+							help='Number of samples for estimating the subspace'
+						)
 	parser.add_argument("--eta_set", type=str, default="(1.0, 1.0, -1.0)", help="Weighting of the subspace components")
-	parser.add_argument("--n_subspace_layers", type=int, default=-2, help="Which layers of the lm to apply our method to. Negative means last n layers")
+	parser.add_argument(
+							"--n_subspace_layers", type=int, default=-2,
+							help="Which layers of the lm to apply our method to. Negative means last n layers"
+						)
+	parser.add_argument("--classf_step_freq", type=int, default=1, help='How frequently to update classifier')
 	parser.add_argument("--classifier_dropout", type=float, default=0.1)
 	parser.add_argument("--test_task_file", type=str, default=None)
 	parser.add_argument("--dev_task_file", type=str, default=None)
+	# End Change [ldery]
+
 	parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
 	parser.add_argument("--server_ip", type=str, default="", help="For distant debugging.")
 	parser.add_argument("--server_port", type=str, default="", help="For distant debugging.")
@@ -792,22 +808,26 @@ def main():
 									pca_every=args.pca_every, num_basis=args.num_basis, num_samples_for_basis=args.num_samples_for_basis,
 									eta_set=eval(args.eta_set), num_subspace_decomp_layers=args.n_subspace_layers,
 									dropout=args.classifier_dropout, test_task_file=args.test_task_file, dev_task_file=args.dev_task_file,
-									save_path = os.path.join(args.output_dir, 'grad_surgery_model.pth'),
-									multitask_weight=args.lm_mt_task_weight, max_seq_len=args.classf_max_seq_len
+									save_path=os.path.join(args.output_dir, 'grad_surgery_model.pth'), step_frequency=args.classf_step_freq,
+									multitask_weight=args.lm_mt_task_weight, max_seq_len=args.classf_max_seq_len,
+
 			)
 	# Also need to modify the args to the initializer of the class
 	model.to(args.device)
 	grad_surgery_model.to(args.device)
 
 	if args.local_rank == 0:
-		torch.distributed.barrier()  # End of barrier to make sure only the first process in distributed training download model & vocab
+		# End of barrier to make sure only the first process in distributed training download model & vocab
+		torch.distributed.barrier()
 
 	logger.info("Training/evaluation parameters %s", args)
 
 	# Training
 	if args.do_train:
 		if args.local_rank not in [-1, 0]:
-			torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training process the dataset, and the others will use the cache
+			# Barrier to make sure only the first process in distributed training process the dataset,
+			# and the others will use the cache
+			torch.distributed.barrier()
 		train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
 
 		if args.local_rank == 0:
@@ -827,16 +847,25 @@ def main():
 				"params": [p for n, p in grad_surgery_model.classifier.named_parameters() if not any(nd in n for nd in no_decay)],
 				"weight_decay": args.classf_wd,
 			},
-			{"params": [p for n, p in grad_surgery_model.classifier.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
+			{
+				"params": [p for n, p in grad_surgery_model.classifier.named_parameters() if any(nd in n for nd in no_decay)],
+				"weight_decay": 0.0
+			},
 		]
 
 		classf_total = grad_surgery_model.get_ft_steps(args.classf_ft_epochs)
-		classifier_optim = AdamW(optimizer_grouped_parameters, betas=eval(args.classf_betas), lr=args.classf_lr, eps=args.adam_epsilon)
-		classifier_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(classifier_optim, mode='max', factor=0.5, patience=args.classf_patience)
+		classifier_optim = AdamW(
+									optimizer_grouped_parameters, weight_decay=args.classf_wd,
+									betas=eval(args.classf_betas), lr=args.classf_lr, eps=args.adam_epsilon
+								)
+		classifier_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+									classifier_optim, mode='max', factor=0.5, patience=args.classf_patience
+								)
 		grad_surgery_model.set_optim(classifier_optim, classifier_scheduler)
-		grad_surgery_model.do_finetuning(args.classf_ft_epochs, logger, patience=args.classf_patience)
+		grad_surgery_model.do_finetuning(args.classf_ft_epochs, logger, patience=args.classf_pretr_patience)
 
-	# Saving best-practices: if you use save_pretrained for the model and tokenizer, you can reload them using from_pretrained()
+	# Saving best-practices: if you use save_pretrained for the model and tokenizer,
+	# you can reload them using from_pretrained()
 	if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
 		# Create output directory if needed
 		if args.local_rank in [-1, 0]:
