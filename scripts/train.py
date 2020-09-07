@@ -8,6 +8,7 @@ import tempfile
 from typing import Any, Dict
 from pathlib import Path
 import numpy as np
+import torch
 from environments.datasets import DATASETS
 from environments.hyperparameters import HYPERPARAMETERS
 
@@ -80,7 +81,8 @@ def main():
 						help="if set, will run over jackknife samples")
 	parser.add_argument('--gpu_id', type=int, default=0, help='The gpu to run on')
 	args = parser.parse_args()
-	
+	args.device = args.gpu_id = str(torch.cuda.current_device())
+	print('The current available device is : ', args.device)
 	if args.device:
 		os.environ['CUDA_DEVICE'] = args.device
 
