@@ -57,7 +57,7 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 					test_task_file=None,
 					dev_task_file=None,
 					max_norm=1.0,
-					classf_train_batch_sz=256,
+					classf_train_batch_sz=128,
 					save_path=None,
 					multitask_weight=None
 	):
