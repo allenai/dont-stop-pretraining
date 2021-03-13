@@ -276,6 +276,7 @@ def train(
 	args.prim_start = int(args.prim_start * t_total)
 	args.train_epochs = t_total
 	args.alt_freq = int(args.alt_freq * t_total)
+	args.alt_freq = max(args.alt_freq, 2) # Setting a minimum frequency of 2
 	auxTaskModel.setup_alpha_generator(args)
 	# End change by [ldery]
 
@@ -384,12 +385,13 @@ def train(
 				loss.backward()
 			tr_loss += loss.item()
 			
-			auxTaskModel.classifier_sample_grad(factor=grad_accum_factor)
+			auxTaskModel.classifier_sample_grad()
 			if (step + 1) % args.gradient_accumulation_steps == 0:
 				if args.fp16:
 					torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
 				else:
 					torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+				# Todo [ldery] - make sure all the gradient stuff you expect to happen is happening
 				# Begin change by [ldery]
 				torch.nn.utils.clip_grad_norm_(auxTaskModel.get_classifier_params(), args.max_grad_norm)
 				classifier_optim.step()
@@ -439,10 +441,14 @@ def train(
 					dev_metrics = auxTaskModel.evaluate_classifier(set_='dev')
 					test_metrics = auxTaskModel.evaluate_classifier(set_='test')
 					for k, v in train_metrics.items():
-						print_out = "[{}] | Train : {} | Dev Set : {} | Test Set : {}".format(k, v, dev_metrics[k], test_metrics[k])
+						print_out = "[{}] | Train : {:.3f} | Dev Set : {:.3f} | Test Set : {:.3f}".format(k, v, dev_metrics[k], test_metrics[k])
 						logger.info(print_out)
-					logger.info('Now Saving the Classifier Model')
 					classifier_dev_perfs.append(dev_metrics['f1'])
+					if dev_metrics['f1'] >= max(classifier_dev_perfs):
+						# We want to save the best model here
+						print('Current best dev f1 = {} achieved. Saving model'.format(dev_metrics['f1']))
+						logger.info('Now Saving the Classifier Model')
+						auxTaskModel.save()
 					# Record the metrics for the alpha generator
 					auxTaskModel.alpha_generator_algo.record_epoch_end(global_step, dev_metrics['f1'], test_metrics['f1'])
 					if len(classifier_dev_perfs) > args.classf_patience:
@@ -452,8 +458,6 @@ def train(
 							print('Stopping Early at Epoch {} because No Improvement in Dev Set Accuracy'.format(epoch))
 							train_iterator.close()
 							break
-# 						else:
-# 							auxTaskModel.save()
 
 			if args.max_steps > 0 and global_step > args.max_steps:
 				epoch_iterator.close()
@@ -686,11 +690,15 @@ def main():
 	parser.add_argument("--classf_patience", type=int, default=5)
 	parser.add_argument("--classf_max_seq_len", type=int, default=384)
 	parser.add_argument("--classf_lr", type=float, default=2e-5, help="Learning rate of classifier")
+	parser.add_argument("--classf_ft_iters", type=int, default=10, help='Number of finetuning iterations')
+	parser.add_argument("--classf_ft_patience", type=int, default=3, help='finetuning patience iterations')
+
 
 	parser.add_argument("--classifier_dropout", type=float, default=0.1)
 	parser.add_argument("--test_task_file", type=str, default=None)
 	parser.add_argument("--dev_task_file", type=str, default=None)
-	parser.add_argument("--primary_task_id", type=str, default='imdb', choices=["imdb", "amazon"])
+	parser.add_argument("--primary_task_id", type=str, default='imdb', choices=["imdb", "amazon", "imdb_small"])
+	parser.add_argument("--n-runs-classf", type=int, default=5)
 	# End Change [ldery]
 
 	parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
@@ -819,6 +827,7 @@ def main():
 										alpha_generator_algo=args.alpha_update_algo, primary_task_id=args.primary_task_id,
 										dropout=args.classifier_dropout, prim_test_file=args.test_task_file, batch_sz=args.per_gpu_train_batch_size,
 										prim_dev_file=args.dev_task_file, save_path=os.path.join(args.output_dir, 'modelWAuxTasks.pth'),
+										grad_accum_factor=args.gradient_accumulation_steps
 									)
 	# Also need to modify the args to the initializer of the class
 	model.to(args.device)
@@ -845,6 +854,35 @@ def main():
 		logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 		# Saving the visualization
 		auxTaskModel.alpha_generator_algo.viz_results(args.output_dir, group_aux=(not args.meta_learn_aux))
+		# We want to now do the training for aux-model-independently
+		all_f1s, all_accs = [], []
+		# Reset batch-size information
+		for i in range(args.n_runs_classf):
+			torch.cuda.empty_cache()
+			args.seed = i
+			set_seed(args)
+			print('Currently working on seed : {}/{}'.format(i + 1,  args.n_runs_classf))
+			print('Loading the saved model that performed best on primary task')
+			auxTaskModel.load_primary(args.device)
+			# Setup an optimizer for the classifier
+			classifier_params = auxTaskModel.get_classifier_params(keys=[auxTaskModel.primary_task_id])
+			this_optim = AdamW(
+										classifier_params, betas=eval(args.classf_betas),
+										weight_decay=args.classf_wd, lr=args.classf_lr
+									)
+			# Todo [ldery] - maybe you should put back lr scheduling. Do hyperparam on this
+			this_lr_scheduler = None 
+			best_f1, best_acc, perfs  = auxTaskModel.train_primary(args.classf_ft_iters, this_optim, this_lr_scheduler, args.max_grad_norm, patience=args.classf_ft_patience)
+			print('Run {}. Final Test (F1={:.3f}, Accuracy={:.3f})'.format(i, best_f1, best_acc))
+			pickle.dump(perfs, open(os.path.join(args.output_dir, 'ftmodel.{}.perf.pkl'.format(i)), 'wb') )
+			all_f1s.append(best_f1)
+			all_accs.append(best_acc)
+		all_accs, all_f1s = np.array(all_accs), np.array(all_f1s)
+		print("Test F1 - {:3f} +/ {:.3f}".format(all_f1s.mean(), all_f1s.std()))
+		print("Test Ac - {:3f} +/ {:.3f}".format(all_accs.mean(), all_accs.std()))
+		pickle.dump([all_accs, all_f1s], open(os.path.join(args.output_dir, 'ftmodel.bestperfs.pkl'.format(i)), 'wb') )
+		# Need to run training code here
+		# Need to save and broad-cast statistics
 
 	# Saving best-practices: if you use save_pretrained for the model and tokenizer,
 	# you can reload them using from_pretrained()
@@ -870,25 +908,25 @@ def main():
 		tokenizer = AutoTokenizer.from_pretrained(args.output_dir)
 		model.to(args.device)
 
-	# Evaluation
+# 	# Evaluation
 	results = {}
-	if args.do_eval and args.local_rank in [-1, 0]:
-		checkpoints = [args.output_dir]
-		if args.eval_all_checkpoints:
-			checkpoints = list(
-				os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + "/**/" + WEIGHTS_NAME, recursive=True))
-			)
-			logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)  # Reduce logging
-		logger.info("Evaluate the following checkpoints: %s", checkpoints)
-		for checkpoint in checkpoints:
-			global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
-			prefix = checkpoint.split("/")[-1] if checkpoint.find("checkpoint") != -1 else ""
+# 	if args.do_eval and args.local_rank in [-1, 0]:
+# 		checkpoints = [args.output_dir]
+# 		if args.eval_all_checkpoints:
+# 			checkpoints = list(
+# 				os.path.dirname(c) for c in sorted(glob.glob(args.output_dir + "/**/" + WEIGHTS_NAME, recursive=True))
+# 			)
+# 			logging.getLogger("transformers.modeling_utils").setLevel(logging.WARN)  # Reduce logging
+# 		logger.info("Evaluate the following checkpoints: %s", checkpoints)
+# 		for checkpoint in checkpoints:
+# 			global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
+# 			prefix = checkpoint.split("/")[-1] if checkpoint.find("checkpoint") != -1 else ""
 
-			model = AutoModelWithLMHead.from_pretrained(checkpoint)
-			model.to(args.device)
-			result = evaluate(args, model, tokenizer, prefix=prefix)
-			result = dict((k + "_{}".format(global_step), v) for k, v in result.items())
-			results.update(result)
+# 			model = AutoModelWithLMHead.from_pretrained(checkpoint)
+# 			model.to(args.device)
+# 			result = evaluate(args, model, tokenizer, prefix=prefix)
+# 			result = dict((k + "_{}".format(global_step), v) for k, v in result.items())
+# 			results.update(result)
 
 	return results
 

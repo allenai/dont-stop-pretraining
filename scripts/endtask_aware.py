@@ -21,6 +21,7 @@ sys.path.insert(1, PATH)
 from utils import *
 from .alpha_generator import *
 import pdb
+from tqdm import tqdm
 
 # Setting up gpu usage monitoring
 nvidia_smi.nvmlInit()
@@ -54,6 +55,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 					samples_per_run=1,
 					prim_dev_file =None, 
 					prim_test_file =None,
+					grad_accum_factor=8
 	):
 		assert save_path is not None, 'Invalid Save Path Provided for Classifier Head'
 		assert isinstance(base_task_dataset_files, dict), 'Invalid type of base_task_dataset_files. Expected array'
@@ -73,9 +75,10 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		self.primary_task_id = primary_task_id
 		self.prim_dev_file = prim_dev_file
 		self.prim_test_file = prim_test_file
+		self.prim_train_dataset = None
 		self.prim_dev_dataset = None
 		self.prim_test_dataset = None
-		
+		self.grad_accum_factor = grad_accum_factor
 
 
 	def setup_alpha_generator(self, options):
@@ -141,9 +144,11 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 # 			self.add_module('AuxHead-{}'.format(idx_), classifier)
 
 	# Get the list of classifier parameters
-	def get_classifier_params(self):
+	def get_classifier_params(self, keys=None):
 		param_list = []
-		for key in self.datasets.keys():
+		if keys is None:
+			keys = self.datasets.keys()
+		for key in keys:
 			this_classf = getattr(self, "AuxHead-{}".format(key), None)
 			assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(key)
 			filtered_param_list = [param for pname, param in this_classf.named_parameters() if '_text_field_embedder' not in pname]
@@ -180,6 +185,19 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 			save_dict,
 			path
 		)
+	
+	def set_save_path(self, save_path):
+		self.save_path = save_path
+
+	def remove_auxiliary_classifiers(self):
+		param_list = []
+		for key in self.datasets.keys():
+			if key == self.primary_task_id:
+				continue
+			delattr(self, "AuxHead-{}".format(key))
+			this_classf = getattr(self, "AuxHead-{}".format(key), None)
+			assert this_classf is None, 'Auxiliary Classifier {} was not removed'.format(key)
+
 
 	def load(self):
 		# We are assuming that what we care about is the primary task parameters
@@ -195,6 +213,15 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 			self.optimizer.load_state_dict(state_dict['optimizer_sd'])
 			self.ft_lr_scheduler = state_dict['scheduler']
 		self.base_lm_model = this_classf._text_field_embedder
+	
+	def load_primary(self, device):
+		# We are assuming that what we care about is the primary task parameters
+		primary_classifier = getattr(self, "AuxHead-{}".format(self.primary_task_id), None)
+		assert primary_classifier is not None, 'Cannot find primary task classifier head to load'
+		state_dict = torch.load(self.save_path)
+		primary_classifier.load_state_dict(state_dict[self.primary_task_id])
+		primary_classifier.to(device)
+		self.base_lm_model = primary_classifier._text_field_embedder
 
 	# Evaluate the classifier
 	def evaluate_classifier(self, set_='dev'):
@@ -203,10 +230,11 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		if set_ == 'dev':
 			fdict_ = {'dev': self.prim_dev_file}
 			if self.prim_dev_dataset is None:
-				self.prim_dev_dataset = self.setup_datasets(
+				dataset = self.setup_datasets(
 										fdict_, self.model_name, self.max_seq_len,
 										label_vocab=self.datasets[self.primary_task_id]['vocab']
-									)['dev']
+									)
+				self.prim_dev_dataset = dataset['dev']
 			dataset = self.prim_dev_dataset
 		else:
 			fdict_ = {'test': self.prim_test_file}
@@ -219,11 +247,11 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 
 		this_classf = getattr(self, "AuxHead-{}".format(self.primary_task_id), None)
 		assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(key)
-		this_classf.eval()
 		# Run the classifier
-		for samples in self.dataset_iterator(dataset):
-			_ = this_classf(*samples)
-		this_classf.train()
+		torch.cuda.empty_cache()
+		with torch.no_grad():
+			for samples in self.dataset_iterator(dataset):
+				_ = this_classf(*samples)
 		# Get the metrics from the classifier
 		return this_classf.get_metrics(reset=True)
 
@@ -244,7 +272,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		return sentences, labels
 
 	# Calculate the gradient for the classifier and lm
-	def classifier_sample_grad(self, factor=1.0):
+	def classifier_sample_grad(self):
 		# Account for the masked-language-modelling task
 		mlm_weight = self.alpha_generator_algo["MLM"]
 		# Modify the current gradients in the base lm model
@@ -261,8 +289,64 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 				sent_dict, labels = self.get_classifier_samples(task_id, self.batch_sz)
 				output_dict = this_classf(sent_dict, labels)
 				total_loss = total_loss + self.alpha_generator_algo[task_id]*output_dict['loss']
-				total_loss = total_loss * factor
+				total_loss = total_loss / self.grad_accum_factor
 				total_loss.backward()
+				
+	
+	def train_primary(self, n_iters, optimizer, lr_scheduler, max_grad_norm, patience=3):
+		# Setup Optimizer and stuff
+		best_iter = 0
+		if self.prim_train_dataset is None:
+			fdict_ = {'train': self.base_task_dataset_files[self.primary_task_id]}
+			dataset = self.setup_datasets(
+										fdict_, self.model_name, self.max_seq_len,
+										label_vocab=self.datasets[self.primary_task_id]['vocab']
+									)
+			self.prim_train_dataset = dataset['train']
+		dataset = self.prim_train_dataset
+		prim_classf = getattr(self, "AuxHead-{}".format(self.primary_task_id), None)
+		assert prim_classf is not None, 'Auxiliary Classifier {} not found'.format(key)
+		self.perfs = defaultdict(list)
+		iters_since_improvement = 0
+		for iter_ in range(n_iters):
+			print('Currently on Classifier Epoch {}/{}'.format(iter_ + 1, n_iters))
+			iterator = self.dataset_iterator(dataset, shuffle=True)
+			total_iters = len(dataset['tokens']) // self.batch_sz
+			# Get the primary classifier
+			iterator = tqdm(iterator, total= total_iters, desc="Classifier Train Iterator")
+			for idx, samples in enumerate(iterator):
+				if (idx + 1) % self.grad_accum_factor == 0:
+					# We want to take a gradient step
+					torch.nn.utils.clip_grad_norm_(prim_classf.parameters(), max_grad_norm)
+					optimizer.step()
+					if lr_scheduler is not None:
+						lr_scheduler.step()
+					optimizer.zero_grad()
+				output_dict = prim_classf(*samples)
+				total_loss = output_dict['loss'] / self.grad_accum_factor
+				total_loss.backward()
+			# We want to evaluate the classifier
+			train_metrics = self.get_metrics(reset=True)
+			dev_metrics = self.evaluate_classifier(set_='dev')
+			test_metrics = self.evaluate_classifier(set_='test')
+			# Report the metrics
+			for k, v in train_metrics.items():
+				to_show = k, v, dev_metrics[k], test_metrics[k]
+				print_out = "[{}] | Train : {:.3f} | Dev Set : {:.3f} | Test Set : {:.3f}".format(*to_show)
+				print(print_out)
+			self.perfs['train'].append((train_metrics['f1'], train_metrics['accuracy']))
+			self.perfs['dev'].append((dev_metrics['f1'], dev_metrics['accuracy']))
+			self.perfs['test'].append((test_metrics['f1'], test_metrics['accuracy']))
+			if dev_metrics['f1'] >= self.perfs['dev'][best_iter][0]:
+				best_iter = iter_
+				iters_since_improvement = 0
+			else:
+				iters_since_improvement += 1
+				if iters_since_improvement >= patience:
+					print('Breaking because we have no improvement in {} epochs'.format(patience))
+					break
+		best_f1, best_acc = self.perfs['test'][best_iter]
+		return best_f1, best_acc, self.perfs
 
 
 	def dataset_iterator(self, dataset, shuffle=False):
@@ -280,6 +364,8 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 			sentences = sentences.to(self.base_lm_model.device)
 			labels = torch.IntTensor(labels).to(self.base_lm_model.device)
 			yield sentences, labels
+			del sentences
+			del labels
 
 
 	# Hack this models forward pass to respond to the lm forward pass
