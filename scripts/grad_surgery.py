@@ -139,7 +139,18 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 			chosen = sorted_layers[num_layers:]
 		else:
 			chosen = sorted_layers[:num_layers]
-		return [y for x in chosen for y in layer_names[x]]
+		result = []
+		for k in all_layer_names:
+			if 'embeddings' in k:
+				result.append(k)
+		layer_results = [y for x in chosen for y in layer_names[x]]
+		result.extend(layer_results)
+		total_size = 0
+		for k, v in self.classifier.named_parameters():
+			if k in result:
+				total_size += v.numel()
+		print('THIS IS THE TOTAL SIZE !!!! - ', total_size / 1e6)
+		return result
 
 	def is_subspace_layer(self, layer_name):
 		for k in self.subspace_decomp_layers:
@@ -408,9 +419,10 @@ class ModelWithGradSurgery(AutoModelWithLMHead):
 			out_span_grad = grad_vec - (in_span_grad_pos + in_span_grad_neg)
 
 			# Calculate the new gradient
-			new_grads = out_span_grad * self.g_weights.eta_tilde
-			new_grads = new_grads + (in_span_grad_pos * self.g_weights.eta_pos) + (in_span_grad_neg * self.g_weights.eta_neg)
-			new_grads = new_grads + (mt_weighting * rand_classifier_grad.squeeze())
+			out_span_grad.mul_(self.g_weights.eta_tilde)
+			in_span_grad_pos.mul_(self.g_weights.eta_pos)
+			in_span_grad_neg.mul_(self.g_weights.eta_neg)
+			new_grads = out_span_grad + in_span_grad_neg + in_span_grad_pos + (mt_weighting * rand_classifier_grad.squeeze())
 		return new_grads
 
 	def rand_sample_ortho_grad_basis(self):
