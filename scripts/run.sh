@@ -17,11 +17,11 @@ then
 else
     hp="ROBERTA_CLASSIFIER_SMALL"
 fi
-
+echo 'This is the gpu_id : '$gpu_id
 for i in $(seq 1 $num_samples);
 do 
     rand_int=$RANDOM
-    python -m scripts.train \
+    CUDA_VISIBLE_DEVICES=$gpu_id; python -m scripts.train \
         --config ./training_config/$task.jsonnet \
         --serialization_dir ./model_logs/${name_prefix}_${task}_${dataset}_${rand_int} \
         --model $model \
@@ -32,7 +32,7 @@ do
         --override \
         --evaluate_on_test \
         --seed $rand_int \
-        --gpu_id $gpu_id
+
 done
 
 # for i in $(seq 1 $num_samples);

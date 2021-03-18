@@ -22,6 +22,8 @@ from utils import *
 from .alpha_generator import *
 import pdb
 from tqdm import tqdm
+import torch.nn.init as init
+import math
 
 # Setting up gpu usage monitoring
 nvidia_smi.nvmlInit()
@@ -142,17 +144,37 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 			classifier = BasicClassifierWithF1(vocab, text_field_embedder, seq2vec_encoder, feedforward, dropout=dropout)
 			setattr(self, 'AuxHead-{}'.format(idx_), classifier)
 # 			self.add_module('AuxHead-{}'.format(idx_), classifier)
+	
+	def reinit_primary(self):
+		prim_classifier = getattr(self, "AuxHead-{}".format(self.primary_task_id), None)
+		assert prim_classifier is not None, 'Auxiliary Classifier {} not found'.format(self.primary_task_id)
+		def reset_this(weight, bias):
+			with torch.no_grad():
+				init.kaiming_uniform_(weight, a=math.sqrt(5))
+				if bias is not None:
+					fan_in, _ = init._calculate_fan_in_and_fan_out(weight)
+					bound = 1 / math.sqrt(fan_in)
+					init.uniform_(bias, -bound, bound)
+
+		for module in prim_classifier._feedforward_layer._linear_layers:
+			print('Before : ', module.weight.min().item(), module.bias.min().item())
+			reset_this(module.weight, module.bias)
+			print('After : ', module.weight.min().item(), module.bias.min().item())
+		reset_this(prim_classifier._classification_layer.weight, prim_classifier._classification_layer.bias)
 
 	# Get the list of classifier parameters
-	def get_classifier_params(self, keys=None):
+	def get_classifier_params(self, keys=None, withbase=False):
 		param_list = []
 		if keys is None:
 			keys = self.datasets.keys()
-		for key in keys:
+		for idx, key in enumerate(keys):
 			this_classf = getattr(self, "AuxHead-{}".format(key), None)
 			assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(key)
-			filtered_param_list = [param for pname, param in this_classf.named_parameters() if '_text_field_embedder' not in pname]
-			param_list.extend(filtered_param_list)
+			if withbase and key == self.primary_task_id:
+				param_list.extend(this_classf.named_parameters())
+			else:
+				filtered_param_list = [param for pname, param in this_classf.named_parameters() if '_text_field_embedder' not in pname]
+				param_list.extend(filtered_param_list)
 		return param_list
 
 	# Move the model to the appropriate devices
@@ -249,9 +271,11 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(key)
 		# Run the classifier
 		torch.cuda.empty_cache()
+		this_classf.eval()
 		with torch.no_grad():
 			for samples in self.dataset_iterator(dataset):
 				_ = this_classf(*samples)
+		this_classf.train()
 		# Get the metrics from the classifier
 		return this_classf.get_metrics(reset=True)
 
@@ -305,6 +329,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 			self.prim_train_dataset = dataset['train']
 		dataset = self.prim_train_dataset
 		prim_classf = getattr(self, "AuxHead-{}".format(self.primary_task_id), None)
+		prim_classf.train()
 		assert prim_classf is not None, 'Auxiliary Classifier {} not found'.format(key)
 		self.perfs = defaultdict(list)
 		iters_since_improvement = 0
