@@ -43,7 +43,7 @@ def main():
 						nargs="+",
 						type=int,
 						required=False,
-						default=[np.random.randint(0, 1000000)],
+						default=[np.random.randint(1000000, 2**32) for _ in range(5)],
 						help="seed to run on. if not supplied, will choose random seed. if more than one seed supplied, will iterate.")
 	parser.add_argument('-e',
 						'--hyperparameters',
@@ -81,11 +81,16 @@ def main():
 						help="if set, will run over jackknife samples")
 	parser.add_argument('--gpu_id', type=int, default=0, help='The gpu to run on')
 	args = parser.parse_args()
-	args.device = args.gpu_id = str(torch.cuda.current_device())
+
+	# Todo. [ldery] - need to reset this
+	if args.gpu_id:
+		args.device = '0'
+	else:
+		args.device = args.gpu_id = str(torch.cuda.current_device())
 	print('The current available device is : ', args.device)
 	if args.device:
 		os.environ['CUDA_DEVICE'] = args.device
-
+	print('This is the OS CUDA DEVICE ', os.environ['CUDA_DEVICE'])
 	environment = HYPERPARAMETERS[args.hyperparameters.upper()]
 
 	if not DATASETS.get(args.dataset):
@@ -110,6 +115,7 @@ def main():
 	os.environ['SKIP_EARLY_STOPPING'] = str(int(args.skip_early_stopping))
 	os.environ['VALIDATION_METRIC'] = str(args.perf)
 	os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
+
 	allennlp_command = [
 			"allennlp",
 			"train",
@@ -135,7 +141,7 @@ def main():
 				except:
 					break
 		else:
-			allennlp_command[-1] = str(args.serialization_dir)
+			allennlp_command[-1] = str(args.serialization_dir) + "_" + str(seed)
 			if os.path.exists(allennlp_command[-1]) and args.override:
 				print(f"overriding {allennlp_command[-1]}")
 				shutil.rmtree(allennlp_command[-1])

@@ -216,6 +216,26 @@ def mask_tokens(inputs: torch.Tensor, tokenizer: PreTrainedTokenizer, args) -> T
 	# The rest of the time (10% of the time) we keep the masked input tokens unchanged
 	return inputs, labels
 
+def save_chkpt(args, id_, model, tokenizer, optimizer, scheduler, rotate_chkpt=True):
+	checkpoint_prefix = "checkpoint"
+	output_dir = os.path.join(args.output_dir, "{}-{}".format(checkpoint_prefix, id_))
+	os.makedirs(output_dir, exist_ok=True)
+	model_to_save = (
+		model.module if hasattr(model, "module") else model
+	)  # Take care of distributed/parallel training
+	model_to_save.save_pretrained(output_dir)
+	tokenizer.save_pretrained(output_dir)
+
+	torch.save(args, os.path.join(output_dir, "training_args.bin"))
+	logger.info("Saving model checkpoint to %s", output_dir)
+
+	if rotate_chkpt:
+		_rotate_checkpoints(args, checkpoint_prefix)
+
+	torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+	torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+	logger.info("Saving optimizer and scheduler states to %s", output_dir)
+
 
 def train(
 			args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer,
@@ -277,6 +297,7 @@ def train(
 	args.prim_start = int(args.prim_start * t_total)
 	args.train_epochs = t_total
 	args.alt_freq = int(args.alt_freq * t_total)
+	print('This is the total iters {}. This is the frequency {}'.format(t_total, args.alt_freq))
 	args.alt_freq = max(args.alt_freq, 2) # Setting a minimum frequency of 2
 	auxTaskModel.setup_alpha_generator(args)
 	# End change by [ldery]
@@ -434,23 +455,8 @@ def train(
 					logging_loss = tr_loss
 
 				if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
-					checkpoint_prefix = "checkpoint"
-					output_dir = os.path.join(args.output_dir, "{}-{}".format(checkpoint_prefix, global_step))
-					os.makedirs(output_dir, exist_ok=True)
-					model_to_save = (
-						model.module if hasattr(model, "module") else model
-					)  # Take care of distributed/parallel training
-					model_to_save.save_pretrained(output_dir)
-					tokenizer.save_pretrained(output_dir)
-
-					torch.save(args, os.path.join(output_dir, "training_args.bin"))
-					logger.info("Saving model checkpoint to %s", output_dir)
-
-					_rotate_checkpoints(args, checkpoint_prefix)
-
-					torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-					torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-					logger.info("Saving optimizer and scheduler states to %s", output_dir)
+					
+					save_chkpt(args, str(global_step), model, tokenizer, optimizer, scheduler, rotate_chkpt=True)
 				
 				if global_step % int(t_total * 0.05) == 0:
 					train_metrics = auxTaskModel.get_metrics(reset=True)
@@ -465,6 +471,8 @@ def train(
 						print('Current best dev f1 = {} achieved. Saving model'.format(dev_metrics['f1']))
 						logger.info('Now Saving the Classifier Model')
 						auxTaskModel.save()
+						logger.info('Saving Base Model')
+						save_chkpt(args, 'best', model, tokenizer, optimizer, scheduler, rotate_chkpt=False)
 					# Record the metrics for the alpha generator
 					auxTaskModel.alpha_generator_algo.record_epoch_end(global_step, dev_metrics['f1'], test_metrics['f1'])
 					if len(classifier_dev_perfs) > args.classf_patience:
@@ -706,6 +714,7 @@ def main():
 	parser.add_argument("--classf_patience", type=int, default=5)
 	parser.add_argument("--classf_max_seq_len", type=int, default=384)
 	parser.add_argument("--classf_lr", type=float, default=2e-5, help="Learning rate of classifier")
+	parser.add_argument("--classf_ft_lr", type=float, default=2e-6, help="Learning rate of classifier for finetuning")
 	parser.add_argument("--classf_ft_iters", type=int, default=10, help='Number of finetuning iterations')
 	parser.add_argument("--classf_ft_patience", type=int, default=3, help='finetuning patience iterations')
 	parser.add_argument("--classf_iter_batchsz", type=int, default=8, help='Batch Size per iteration. True batch_sz is this x number of grad accumulation steps')
@@ -714,9 +723,10 @@ def main():
 	parser.add_argument("--classifier_dropout", type=float, default=0.1)
 	parser.add_argument("--test_task_file", type=str, default=None)
 	parser.add_argument("--dev_task_file", type=str, default=None)
-	parser.add_argument("--primary_task_id", type=str, default='imdb', choices=["imdb", "amazon", "imdb_small"])
-	parser.add_argument("--n-runs-classf", type=int, default=5)
+	parser.add_argument("--primary_task_id", type=str, default='imdb', choices=["imdb", "amazon", "imdb_small", "citation_intent"])
+	parser.add_argument("--n-runs-classf", type=int, default=1)
 	parser.add_argument("--only-run-classifier", action='store_true', help='Only run the classifier')
+	parser.add_argument("--no-mlm-weight", action='store_true', help='Only learn the classifier - set mlm weight to 0')
 	# End Change [ldery]
 
 	parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
@@ -845,7 +855,7 @@ def main():
 										alpha_generator_algo=args.alpha_update_algo, primary_task_id=args.primary_task_id,
 										dropout=args.classifier_dropout, prim_test_file=args.test_task_file, batch_sz=args.classf_iter_batchsz,
 										prim_dev_file=args.dev_task_file, save_path=os.path.join(args.output_dir, 'modelWAuxTasks.pth'),
-										grad_accum_factor=args.gradient_accumulation_steps
+										grad_accum_factor=args.gradient_accumulation_steps, no_mlm_weight=args.no_mlm_weight
 									)
 	# Also need to modify the args to the initializer of the class
 	model.to(args.device)
@@ -903,7 +913,7 @@ def main():
 			]
 			this_optim = AdamW(
 										optimizer_grouped_parameters, betas=eval(args.classf_betas),
-										weight_decay=args.classf_wd, lr=args.classf_lr
+										weight_decay=args.classf_wd, lr=args.classf_ft_lr
 									)
 			
 			# Todo [ldery] - maybe you should put back lr scheduling. Do hyperparam on this

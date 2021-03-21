@@ -809,7 +809,7 @@ def main():
 									eta_set=eval(args.eta_set), num_subspace_decomp_layers=args.n_subspace_layers,
 									dropout=args.classifier_dropout, test_task_file=args.test_task_file, dev_task_file=args.dev_task_file,
 									save_path=os.path.join(args.output_dir, 'grad_surgery_model.pth'), step_frequency=args.classf_step_freq,
-									multitask_weight=args.lm_mt_task_weight, max_seq_len=args.classf_max_seq_len,
+									multitask_weight=args.lm_mt_task_weight, max_seq_len=args.classf_max_seq_len, no_mlm_weight=args.no_mlm_weight
 
 			)
 	# Also need to modify the args to the initializer of the class

@@ -57,7 +57,8 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 					samples_per_run=1,
 					prim_dev_file =None, 
 					prim_test_file =None,
-					grad_accum_factor=8
+					grad_accum_factor=8,
+					no_mlm_weight=False
 	):
 		assert save_path is not None, 'Invalid Save Path Provided for Classifier Head'
 		assert isinstance(base_task_dataset_files, dict), 'Invalid type of base_task_dataset_files. Expected array'
@@ -81,6 +82,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		self.prim_dev_dataset = None
 		self.prim_test_dataset = None
 		self.grad_accum_factor = grad_accum_factor
+		self.no_mlm_weight = no_mlm_weight
 
 
 	def setup_alpha_generator(self, options):
@@ -271,6 +273,11 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(key)
 		# Run the classifier
 		torch.cuda.empty_cache()
+		# reset the metrics before running new stuff
+		try:
+			_ = this_classf.get_metrics(reset=True)
+		except:
+			print('This classifier does not need to reset metrics.')
 		this_classf.eval()
 		with torch.no_grad():
 			for samples in self.dataset_iterator(dataset):
@@ -299,6 +306,8 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 	def classifier_sample_grad(self):
 		# Account for the masked-language-modelling task
 		mlm_weight = self.alpha_generator_algo["MLM"]
+		if self.no_mlm_weight:
+			mlm_weight = 0.0
 		# Modify the current gradients in the base lm model
 		with torch.no_grad():
 			for pname, p in self.base_lm_model.named_parameters():
@@ -376,7 +385,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 
 	def dataset_iterator(self, dataset, shuffle=False):
 		total_egs = len(dataset['tokens'])
-		num_batches = total_egs // self.batch_sz
+		num_batches = total_egs // self.batch_sz + 1
 		if shuffle:
 			idxs = np.random.permutation(total_egs)
 		else:
