@@ -14,6 +14,10 @@ CITATION = {
 	'citation_intent': '/home/ldery/internship/dsp/datasets/citation_intent/train.jsonl'
 }
 
+CHEMPROT = {
+	'chemprot': '/home/ldery/internship/dsp/datasets/chemprot/train.jsonl'
+}
+
 def get_auxtask_files(task_name):
 	if task_name == 'imdb':
 		return IMDB
@@ -23,5 +27,7 @@ def get_auxtask_files(task_name):
 		return AMAZON
 	elif task_name == 'citation_intent':
 		return CITATION
+	elif task_name == 'chemprot':
+		return CHEMPROT
 	else:
 		raise ValueError
