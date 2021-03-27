@@ -90,7 +90,8 @@ class BasicClassifierWithF1(Model):
 		for i in range(self._num_labels):
 			self._label_f1_metrics[vocab.get_token_from_index(index=i, namespace="labels")] = F1Measure(positive_label=i)
 		self._loss = torch.nn.CrossEntropyLoss(reduction='none')
-		initializer(self)
+		if initializer is not None:
+			initializer(self)
 
 	def forward(  # type: ignore
 				self, tokens: Dict[str, torch.LongTensor], label: torch.IntTensor = None

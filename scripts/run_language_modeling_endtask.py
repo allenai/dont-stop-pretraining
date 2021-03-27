@@ -374,7 +374,8 @@ def train(
 	classifier_dev_perfs = []
 	auxTaskModel.alpha_generator_algo.prep_epoch_start(global_step)
 	for epoch in train_iterator:
-		print('\nGStep = {} Weights : '.format(global_step), auxTaskModel.alpha_generator_algo.weights, '\n')
+		weights = {k: auxTaskModel.alpha_generator_algo[k] for k in auxTaskModel.alpha_generator_algo.weights.keys()}
+		print('\nGStep = {} Weights : '.format(global_step), weights, '\n')
 		epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
 
 		if args.local_rank != -1:
@@ -392,7 +393,12 @@ def train(
 			model.train()
 			outputs = model(inputs, labels=labels)
 			loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
-
+			# Store the gradients for the meta-learner
+			if auxTaskModel.alpha_generator_algo.is_meta:
+				gradients = torch.autograd.grad(loss, model.parameters(), retain_graph=True, allow_unused=True)
+				auxTaskModel.MLM_grads = gradients
+			scale = 0 if args.no_mlm_weight else auxTaskModel.alpha_generator_algo["MLM"]
+			loss = loss * scale
 			if args.n_gpu > 1:
 				loss = loss.mean()  # mean() to average on multi-gpu parallel training
 			grad_accum_factor = 1
@@ -440,6 +446,10 @@ def train(
 				model.zero_grad()
 				global_step += 1
 				auxTaskModel.alpha_generator_algo.prep_epoch_start(global_step)
+				if auxTaskModel.alpha_generator_algo.is_meta:
+					# Reset the dev head and updated the meta-weights
+					auxTaskModel.reset_dev_head()
+					auxTaskModel.alpha_generator_algo.update_meta_weights()
 				# Irregularly report the end of the epoch to save having to do the 
 
 				if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
@@ -700,16 +710,20 @@ def main():
 
 	# Begin Change [ldery]
 	# Weighting Algorithm Specifics
-	parser.add_argument("--alpha_update_algo", type=str, default='default', choices=['default', 'alt', 'warm_up_down', 'phase_in'])
+	parser.add_argument("--alpha_update_algo", type=str, default='default', choices=['default', 'alt', 'warm_up_down', 'phase_in', 'meta'])
 	parser.add_argument("--meta_learn_aux", action='store_true', help='Used to activate a meta-learning algo')
 	parser.add_argument('--alt-freq', type=float, default=0.1, help='If using alt strategy, how often to alternate')
 	parser.add_argument('--prim-start', type=float, default=0.0, help='What epoch to start training on the primary loss')
 	parser.add_argument('--init-val', type=float, default=0.0, help='Initial Task weightings')
 	parser.add_argument('--end-val', type=float, default=1.0, help='Final task weightings')
+	parser.add_argument('--meta-lr-weight', type=float, default=0.01, help='learning rate for meta-learning')
+
 
 	parser.add_argument("--classf_warmup_frac", type=float, default=0.06)
 	parser.add_argument("--classf_betas", type=str, default="(0.9,0.98)")
+	parser.add_argument("--classf_dev_lr", type=float, default=1e-4, help="Learning rate of dev-head")
 	parser.add_argument("--classf_wd", type=float, default=0.1)
+	parser.add_argument("--classf_dev_wd", type=float, default=0.1)
 	parser.add_argument("--base_wd", type=float, default=0.01)
 	parser.add_argument("--classf_patience", type=int, default=5)
 	parser.add_argument("--classf_max_seq_len", type=int, default=384)

@@ -8,7 +8,10 @@ from allennlp.data import Vocabulary
 import numpy as np
 from transformers import (
 	AutoModelWithLMHead,
+	AdamW,
 )
+
+
 import nvidia_smi
 import sys
 PATH="/home/ldery/internship/dsp/dont_stop_pretraining"
@@ -35,6 +38,29 @@ def print_gpu_stats():
 	print('Gpu mem: {} (GiB)'.format(mem_res.used / (1024**2)))  # usage in GiB
 	print('Gpu used: {} %'.format(100 * (mem_res.used / mem_res.total)))
 
+def calc_norm(grads):
+	norm = 0.0
+	for g_ in grads:
+		if g_ is not None:
+			norm += (g_**2).sum()
+	return np.sqrt(norm.item())
+
+def dot_prod(g1, g2):
+	total = 0.0
+	for p1, p2 in zip(g1, g2):
+		if p1 is None or p2 is None:
+			continue
+		total += (p1 * p2).sum()
+	total = total.item() if isinstance(total, torch.Tensor) else total
+	return total
+
+def get_body_end(model):
+	pos = 0
+	for k, _ in model.named_parameters():
+		if '_text_field_embedder' in k:
+			pos += 1
+	return pos
+
 
 class ModelWithAuxTasks(AutoModelWithLMHead):
 	''' Wrapper around a basic model so we can do gradient surgery on the model'''
@@ -54,7 +80,6 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 					alpha_generator_algo='equal',
 					primary_task_id=None,
 					batch_sz=8,
-					samples_per_run=1,
 					prim_dev_file =None, 
 					prim_test_file =None,
 					grad_accum_factor=8,
@@ -68,9 +93,11 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		self.base_lm_model = base_lm_model
 		self.base_task_dataset_files = base_task_dataset_files
 		self.datasets = self.setup_datasets(base_task_dataset_files, model_name, max_seq_len, lazy=False)
-
+		self.embedding_dim = embedding_dim
+		self.num_layers = num_layers
+		self.dropout = dropout
+		self.ff_multiplier = ff_multiplier
 		self.setup_classifiers(dropout, embedding_dim, num_layers, ff_multiplier)
-		self.samples_per_run = samples_per_run
 		self.batch_sz = batch_sz
 		self.max_norm = 1.0
 		self.max_seq_len = max_seq_len
@@ -91,7 +118,12 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		task_names.append("MLM")
 		# Remove the primary task name
 		aux_tasks = [x for x in task_names if x != self.primary_task_id]
+		self.aux_tasks = aux_tasks
 		self.alpha_generator_algo = get_alpha_generator(options, self.primary_task_id, aux_tasks)
+		if self.alpha_generator_algo.is_meta:
+			self.options = options
+			self.dp_stats = defaultdict(list)
+			self.weight_stats = defaultdict(list)
 
 
 	def setup_datasets(self, base_task_dataset_files, model_name, max_seq_len, label_vocab=None, lazy=False):
@@ -135,18 +167,23 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 	# Setup the classifier for all auxiliary tasks
 	def setup_classifiers(self, dropout, embedding_dim, num_layers, ff_multiplier):
 		for idx_, dict_ in self.datasets.items():
-			vocab = dict_['vocab']
-			text_field_embedder = self.base_lm_model
-			seq2vec_encoder = CLSPooler(embedding_dim)
-			hidden_dim = embedding_dim * ff_multiplier
-			feedforward = FeedForward(
-										embedding_dim, num_layers, hidden_dims=hidden_dim,
-										activations=torch.nn.Tanh(), dropout=dropout
-									)
-			classifier = BasicClassifierWithF1(vocab, text_field_embedder, seq2vec_encoder, feedforward, dropout=dropout)
-			setattr(self, 'AuxHead-{}'.format(idx_), classifier)
-# 			self.add_module('AuxHead-{}'.format(idx_), classifier)
-	
+			self.setup_classifier(dropout, idx_, dict_, embedding_dim, ff_multiplier, num_layers=num_layers)
+
+
+	def setup_classifier(self, dropout, task_idx, dataset_dict, embedding_dim, ff_multiplier, num_layers=1):
+		vocab = dataset_dict['vocab']
+		text_field_embedder = self.base_lm_model
+		seq2vec_encoder = CLSPooler(embedding_dim)
+		hidden_dim = embedding_dim * ff_multiplier
+		feedforward = FeedForward(
+									embedding_dim, num_layers, hidden_dims=hidden_dim,
+									activations=torch.nn.Tanh(), dropout=dropout
+								)
+		classifier = BasicClassifierWithF1(vocab, text_field_embedder, seq2vec_encoder, feedforward, dropout=dropout, initializer=None)
+		classifier.to(self.base_lm_model.device)
+		setattr(self, 'AuxHead-{}'.format(task_idx), classifier)
+		return classifier
+
 	def reinit_primary(self):
 		prim_classifier = getattr(self, "AuxHead-{}".format(self.primary_task_id), None)
 		assert prim_classifier is not None, 'Auxiliary Classifier {} not found'.format(self.primary_task_id)
@@ -169,7 +206,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		param_list = []
 		if keys is None:
 			keys = self.datasets.keys()
-		for idx, key in enumerate(keys):
+		for _, key in enumerate(keys):
 			this_classf = getattr(self, "AuxHead-{}".format(key), None)
 			assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(key)
 			if withbase and key == self.primary_task_id:
@@ -199,7 +236,9 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		save_dict = {
 				'optimizer_sd': self.optimizer.state_dict() if hasattr(self, 'optimizer') else None,
 				'scheduler': self.ft_lr_scheduler.state_dict() if hasattr(self, 'ft_lr_scheduler') else None,
-				'perfs': dict(self.perfs) if hasattr(self, 'perfs') else None
+				'perfs': dict(self.perfs) if hasattr(self, 'perfs') else None,
+				'dp_stats': self.dp_stats if hasattr(self, 'dp_stats') else None,
+				'weight_stats': self.weight_stats if hasattr(self, 'weight_stats') else None
 			}
 		for key in self.datasets.keys():
 			this_classf = getattr(self, "AuxHead-{}".format(key), None)
@@ -293,39 +332,146 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		return this_classf.get_metrics(reset=reset)
 
 	# Get samples for a task
-	def get_classifier_samples(self, task_id, nsamples):
-		num_egs = len(self.datasets[task_id]['tokens'])
+	def get_classifier_samples(self, task_id, nsamples, dataset=None):
+		if dataset is None:
+			dataset = self.datasets[task_id]
+		num_egs = len(dataset['tokens'])
 		idxs = np.random.choice(num_egs, size=nsamples, replace=False)
-		sentences, labels = [self.datasets[task_id]['tokens'][i] for i in idxs], self.datasets[task_id]['labels'][idxs]
-		sentences = collate(sentences, self.datasets[task_id]['pad_idx'])
+		sentences, labels = [dataset['tokens'][i] for i in idxs], dataset['labels'][idxs]
+		sentences = collate(sentences, dataset['pad_idx'])
 		sentences = sentences.to(self.base_lm_model.device)
 		labels = torch.IntTensor(labels).to(sentences.device)
 		return sentences, labels
+	
+	# This function should set the dev head
+	def set_dev_head(self):
+		if self.prim_dev_dataset is None:
+			fdict_ = {'dev': self.prim_dev_file}
+			self.prim_dev_dataset = self.setup_datasets(
+										fdict_, self.model_name, self.max_seq_len,
+										label_vocab=self.datasets[self.primary_task_id]['vocab']
+									)['dev']
+		# Learn the head here
+		this_classf = self.learn_dev_head()
+		# Get the dev gradient here
+		dev_sent, dev_labels = self.get_classifier_samples(self.primary_task_id, self.batch_sz, dataset=self.prim_dev_dataset)
+		loss_ = this_classf(dev_sent, dev_labels)['loss']
+		gradients = torch.autograd.grad(loss_, this_classf.parameters(), allow_unused=True)
+		return gradients
+	
+	def reset_dev_head(self):
+		dev_head_name = "AuxHead-{}-{}".format('dev', self.primary_task_id)
+		this_classf = getattr(self, dev_head_name, None)
+		assert this_classf is not None, 'The dev head has to already be instantiated for this function to be called'
+		del this_classf
+		setattr(self, dev_head_name, None)
+
+	def learn_dev_head(self):
+		assert hasattr(self, 'options'), 'The options need to be set for training of the dev head'
+		this_classf = getattr(self, "AuxHead-{}-{}".format('dev', self.primary_task_id), None)
+		if this_classf is None:
+			# Need to instantiate the classifier head
+			this_classf = self.setup_classifier(
+								self.dropout, "{}-{}".format('dev', self.primary_task_id), self.prim_dev_dataset,
+								self.embedding_dim, self.ff_multiplier, num_layers=self.num_layers
+							)
+			# Setup optimizer for dev head
+			dev_params = self.get_classifier_params(["{}-{}".format('dev', self.primary_task_id)], withbase=False)
+			dev_optim =  AdamW(
+									dev_params, betas=eval(self.options.classf_betas),
+									weight_decay=self.options.classf_dev_wd, lr=self.options.classf_dev_lr
+								)
+		else:
+			return this_classf # We train this once and re-use
+		assert dev_optim is not None, 'The optimizer for the dev head has not been instantiated'
+
+		# perform gradient descent to get the dev-head
+		samples = self.get_classifier_samples(self.primary_task_id, self.batch_sz)
+		dev_params = self.get_classifier_params(["{}-{}".format('dev', self.primary_task_id)], withbase=False)
+		prev_loss_, tol = 1e10, 1e-3
+# 		pdb.set_trace()
+		for i in range(self.options.classf_ft_iters):
+			output = this_classf(*samples)
+			loss_ = output['loss']
+			grads = torch.autograd.grad(loss_, dev_params, allow_unused=True)
+			for p, g in zip(dev_params, grads):
+				assert g is not None, 'This should have a gradient'
+				p.grad = g
+			dev_optim.step()
+			metrics = this_classf.get_metrics(reset=True)
+			f1, acc = metrics['f1'], metrics['accuracy']
+# 			print('   Dev iter {} | F1={} , Acc={}, loss={}'.format(i, f1, acc, loss_.item()))
+			if abs(loss_ - prev_loss_) < tol:
+				break
+			prev_loss_ = loss_.item()
+# 		pdb.set_trace()
+		return this_classf
 
 	# Calculate the gradient for the classifier and lm
 	def classifier_sample_grad(self):
-		# Account for the masked-language-modelling task
-		mlm_weight = self.alpha_generator_algo["MLM"]
-		if self.no_mlm_weight:
-			mlm_weight = 0.0
-		# Modify the current gradients in the base lm model
-		with torch.no_grad():
-			for pname, p in self.base_lm_model.named_parameters():
-				assert p.grad is not None, 'Base LM Model should not have None grad for {}'.format(pname)
-				p.grad.mul_(mlm_weight)
+		gradient_dict = None
+		if self.alpha_generator_algo.is_meta:
+			# Do all the setup here
+			gradient_dict = {}
+			# Get the gradients w.r.t the different tasks
+			for task_id in self.base_task_dataset_files.keys():
+				this_classf = getattr(self, "AuxHead-{}".format(task_id), None)
+				assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(task_id)
+				sent_dict, labels = self.get_classifier_samples(task_id, self.batch_sz)
+				loss_ = this_classf(sent_dict, labels)['loss']
+				gradients = torch.autograd.grad(loss_, this_classf.parameters(), allow_unused=True)
+				gradient_dict[task_id] = gradients
+				if not hasattr(self, 'body_params_end'):
+					self.body_params_end = get_body_end(this_classf)
+			
+			# Get the MLM current gradient
+			gradient_dict["MLM"] = self.MLM_grads[:self.body_params_end]
+
+			# Get the gradient dictionary
+			gradient_dict["dev-{}".format(self.primary_task_id)] = self.set_dev_head()
+			dev_task_grads = gradient_dict["dev-{}".format(self.primary_task_id)][:self.body_params_end]
+			meta_weights = self.alpha_generator_algo.weights
+			with torch.no_grad():
+				dev_norm = calc_norm(dev_task_grads)
+				all_tasks = self.aux_tasks + [self.primary_task_id]
+				for task_id in all_tasks:
+					task_norm = calc_norm(gradient_dict[task_id][:self.body_params_end])
+					cos_sim = dot_prod(dev_task_grads, gradient_dict[task_id][:self.body_params_end])
+					cos_sim = cos_sim / (dev_norm * task_norm)
+# 					print('   {} | cosine sim = {}'.format(task_id[:3], cos_sim))
+					self.dp_stats[task_id].append(cos_sim)
+					cos_sim = (torch.zeros_like(meta_weights[task_id]) - cos_sim)  / self.grad_accum_factor
+					if meta_weights[task_id].grad is None:
+						meta_weights[task_id].grad = cos_sim
+					else:
+						meta_weights[task_id].grad.add_(cos_sim)
+					self.weight_stats[task_id].append((meta_weights[task_id].item(), meta_weights[task_id].grad.item(), dev_norm, task_norm, self.dp_stats[task_id][-1]))
+				print('\n')
+
 
 		total_loss = 0.0
 		for task_id in self.base_task_dataset_files.keys():
 			this_classf = getattr(self, "AuxHead-{}".format(task_id), None)
 			assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(task_id)
-			for _ in range(self.samples_per_run):
+			if gradient_dict is None:
 				sent_dict, labels = self.get_classifier_samples(task_id, self.batch_sz)
 				output_dict = this_classf(sent_dict, labels)
 				total_loss = total_loss + self.alpha_generator_algo[task_id]*output_dict['loss']
 				total_loss = total_loss / self.grad_accum_factor
 				total_loss.backward()
-				
-	
+			else:
+				gradients = gradient_dict[task_id]
+# 				names_ = [k for k, _ in this_classf.named_parameters()]
+				with torch.no_grad():
+					scaling = self.alpha_generator_algo[task_id] / self.grad_accum_factor
+					for idx, (p, g) in enumerate(zip(this_classf.parameters(), gradients)):
+						if p.grad is None:
+							p.grad = torch.zeros_like(p)
+						if g is None:
+							continue
+						p.grad.add_(scaling * g)
+
+
 	def train_primary(self, n_iters, optimizer, lr_scheduler, max_grad_norm, patience=3):
 		# Setup Optimizer and stuff
 		best_iter = 0
