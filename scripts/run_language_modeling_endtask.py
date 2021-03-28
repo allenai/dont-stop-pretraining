@@ -285,7 +285,7 @@ def train(
 	)
 
 	# Setup an optimizer for the classifier
-	classifier_params = auxTaskModel.get_classifier_params()
+	classifier_params = auxTaskModel.get_classifier_params(withbase=False)
 	classifier_optim = AdamW(
 								classifier_params, betas=eval(args.classf_betas),
 								weight_decay=args.classf_wd, lr=args.classf_lr
@@ -396,7 +396,7 @@ def train(
 			# Store the gradients for the meta-learner
 			if auxTaskModel.alpha_generator_algo.is_meta:
 				gradients = torch.autograd.grad(loss, model.parameters(), retain_graph=True, allow_unused=True)
-				auxTaskModel.MLM_grads = gradients
+				auxTaskModel.set_mlm_grads(gradients)
 			scale = 0 if args.no_mlm_weight else auxTaskModel.alpha_generator_algo["MLM"]
 			loss = loss * scale
 			if args.n_gpu > 1:
@@ -429,6 +429,8 @@ def train(
 
 			tr_loss += loss.item()
 			auxTaskModel.classifier_sample_grad()
+			# Zero-out the MLM grads because we are done with them at the moment
+			auxTaskModel.set_mlm_grads(None)
 			if (step + 1) % args.gradient_accumulation_steps == 0:
 				if args.fp16:
 					torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
@@ -863,6 +865,7 @@ def main():
 	assert model_name, 'The name of the model is not Set. Maybe use roberta-base as the default'
 	os.makedirs(args.output_dir, exist_ok=True)
 
+	# Instantiate the model with the auxiliary tasks
 	base_task_dataset_files = get_auxtask_files(args.primary_task_id)
 	auxTaskModel = ModelWithAuxTasks(
 										model_name, model, base_task_dataset_files, max_seq_len=args.classf_max_seq_len,
@@ -871,7 +874,7 @@ def main():
 										prim_dev_file=args.dev_task_file, save_path=os.path.join(args.output_dir, 'modelWAuxTasks.pth'),
 										grad_accum_factor=args.gradient_accumulation_steps, no_mlm_weight=args.no_mlm_weight
 									)
-	# Also need to modify the args to the initializer of the class
+	# Move the model to the appropriate device
 	model.to(args.device)
 	auxTaskModel.to(args.device)
 
@@ -899,10 +902,7 @@ def main():
 			auxTaskModel.alpha_generator_algo.viz_results(args.output_dir, group_aux=(not args.meta_learn_aux))
 		# We want to now do the training for aux-model-independently
 		all_f1s, all_accs = [], []
-		# Reset batch-size information
-		# rever to a larger batchsize
 		auxTaskModel.load_primary(args.device)
-		# Reset the sole-training batch-size to a larger one
 		test_metrics = auxTaskModel.evaluate_classifier(set_='test')
 		dev_metrics = auxTaskModel.evaluate_classifier(set_='dev')
 		print('Before Training. Dev  (F1={:.3f}, Accuracy={:.3f})'.format(dev_metrics['f1'], dev_metrics['accuracy']))
@@ -915,7 +915,6 @@ def main():
 			print('Currently working on seed : {}/{}'.format(i + 1,  args.n_runs_classf))
 			print('Loading the saved model that performed best on primary task')
 			auxTaskModel.load_primary(args.device)
-# 			auxTaskModel.reinit_primary()
 			# Setup an optimizer for the classifier
 			classifier_params = auxTaskModel.get_classifier_params(keys=[auxTaskModel.primary_task_id], withbase=True)
 			optimizer_grouped_parameters = [
@@ -942,8 +941,6 @@ def main():
 		print("Test F1 - {:3f} +/ {:.3f}".format(all_f1s.mean(), all_f1s.std()))
 		print("Test Ac - {:3f} +/ {:.3f}".format(all_accs.mean(), all_accs.std()))
 		pickle.dump([all_accs, all_f1s], open(os.path.join(args.output_dir, 'ftmodel.bestperfs.pkl'.format(i)), 'wb') )
-		# Need to run training code here
-		# Need to save and broad-cast statistics
 
 	# Saving best-practices: if you use save_pretrained for the model and tokenizer,
 	# you can reload them using from_pretrained()

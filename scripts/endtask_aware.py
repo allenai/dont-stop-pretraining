@@ -418,6 +418,13 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 				break
 			prev_loss_ = loss_.item()
 		return this_classf
+	
+	def set_mlm_grads(self, grads):
+		if grads is not None:
+			assert self.MLM_grads is None, 'Need to make sure grads are none before setting'
+		else:
+			assert self.MLM_grads is not None, 'Need to make sure grads are set before setting to none'
+		self.MLM_grads = grads
 
 	# Calculate the gradient for the classifier and lm
 	def classifier_sample_grad(self):
@@ -437,6 +444,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 				self.body_params_end = get_body_end(this_classf)
 			
 			# Get the MLM current gradient. Double check that the MLM gradient is set correctly
+			assert self.MLM_grads is not None, 'MLM Grads should have been set by now'
 			gradient_dict["MLM"] = self.MLM_grads[:self.body_params_end]
 
 			# Get the gradient dictionary
