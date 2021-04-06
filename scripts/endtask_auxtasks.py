@@ -18,6 +18,11 @@ CHEMPROT = {
 	'chemprot': '/home/ldery/internship/dsp/datasets/chemprot/train.jsonl'
 }
 
+SCIIE = {
+	'sciie': '/home/ldery/internship/dsp/datasets/sciie/train.jsonl'
+}
+
+
 def get_auxtask_files(task_name):
 	if task_name == 'imdb':
 		return IMDB
@@ -29,5 +34,7 @@ def get_auxtask_files(task_name):
 		return CITATION
 	elif task_name == 'chemprot':
 		return CHEMPROT
+	elif task_name == 'sciie':
+		return SCIIE
 	else:
 		raise ValueError

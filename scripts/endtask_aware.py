@@ -114,6 +114,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		self.prim_test_dataset = None
 		self.grad_accum_factor = grad_accum_factor
 		self.no_mlm_weight = no_mlm_weight
+		self.MLM_grads = None
 
 
 	# Sets up the weighting generator
@@ -417,6 +418,8 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 			if abs(loss_ - prev_loss_) < tol:
 				break
 			prev_loss_ = loss_.item()
+			del grads
+			torch.cuda.empty_cache()
 		return this_classf
 	
 	def set_mlm_grads(self, grads):

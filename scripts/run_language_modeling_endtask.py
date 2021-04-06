@@ -429,8 +429,9 @@ def train(
 
 			tr_loss += loss.item()
 			auxTaskModel.classifier_sample_grad()
-			# Zero-out the MLM grads because we are done with them at the moment
-			auxTaskModel.set_mlm_grads(None)
+			if auxTaskModel.alpha_generator_algo.is_meta:
+				# Zero-out the MLM grads because we are done with them at the moment
+				auxTaskModel.set_mlm_grads(None)
 			if (step + 1) % args.gradient_accumulation_steps == 0:
 				if args.fp16:
 					torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
@@ -477,16 +478,16 @@ def train(
 					for k, v in train_metrics.items():
 						print_out = "[{}] | Train : {:.3f} | Dev Set : {:.3f} | Test Set : {:.3f}".format(k, v, dev_metrics[k], test_metrics[k])
 						logger.info(print_out)
-					classifier_dev_perfs.append(dev_metrics['f1'])
-					if dev_metrics['f1'] >= max(classifier_dev_perfs):
+					classifier_dev_perfs.append(dev_metrics[args.classf_metric])
+					if dev_metrics[args.classf_metric] >= max(classifier_dev_perfs):
 						# We want to save the best model here
-						print('Current best dev f1 = {} achieved. Saving model'.format(dev_metrics['f1']))
+						print('Current best dev f1 = {} achieved. Saving model'.format(dev_metrics[args.classf_metric]))
 						logger.info('Now Saving the Classifier Model')
 						auxTaskModel.save()
 						logger.info('Saving Base Model')
 						save_chkpt(args, 'best', model, tokenizer, optimizer, scheduler, rotate_chkpt=False)
 					# Record the metrics for the alpha generator
-					auxTaskModel.alpha_generator_algo.record_epoch_end(global_step, dev_metrics['f1'], test_metrics['f1'])
+					auxTaskModel.alpha_generator_algo.record_epoch_end(global_step, dev_metrics[args.classf_metric], test_metrics[args.classf_metric])
 					if len(classifier_dev_perfs) > args.classf_patience:
 						max_ = max(classifier_dev_perfs)
 						recent_max = max(classifier_dev_perfs[-args.classf_patience:])
@@ -734,12 +735,12 @@ def main():
 	parser.add_argument("--classf_ft_iters", type=int, default=10, help='Number of finetuning iterations')
 	parser.add_argument("--classf_ft_patience", type=int, default=3, help='finetuning patience iterations')
 	parser.add_argument("--classf_iter_batchsz", type=int, default=8, help='Batch Size per iteration. True batch_sz is this x number of grad accumulation steps')
-
+	parser.add_argument("--classf-metric", type=str, default='f1', choices=['f1', 'accuracy'])
 
 	parser.add_argument("--classifier_dropout", type=float, default=0.1)
 	parser.add_argument("--test_task_file", type=str, default=None)
 	parser.add_argument("--dev_task_file", type=str, default=None)
-	parser.add_argument("--primary_task_id", type=str, default='imdb', choices=["imdb", "amazon", "imdb_small", "citation_intent"])
+	parser.add_argument("--primary_task_id", type=str, default='imdb', choices=["imdb", "amazon", "imdb_small", "citation_intent", "chemprot", "sciie"])
 	parser.add_argument("--n-runs-classf", type=int, default=1)
 	parser.add_argument("--only-run-classifier", action='store_true', help='Only run the classifier')
 	parser.add_argument("--no-mlm-weight", action='store_true', help='Only learn the classifier - set mlm weight to 0')
