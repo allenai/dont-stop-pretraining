@@ -1,6 +1,7 @@
 import torch
 from collections import defaultdict, namedtuple
 from torch.nn.utils import clip_grad_norm_
+from torch.nn import DataParallel
 from allennlp.data.token_indexers.pretrained_transformer_indexer import PretrainedTransformerIndexer
 from allennlp.data.tokenizers.pretrained_transformer_tokenizer import PretrainedTransformerTokenizer
 from allennlp.modules import FeedForward
@@ -14,6 +15,8 @@ from transformers import (
 
 import nvidia_smi
 import sys
+import os
+import pickle
 PATH="/home/ldery/internship/dsp/dont_stop_pretraining"
 sys.path.insert(1, PATH)
 from models import BasicClassifierWithF1
@@ -47,12 +50,17 @@ def calc_norm(grads):
 	return np.sqrt(norm.item())
 
 # Calculates the dot products of 2 gradient vectors
-def dot_prod(g1, g2):
+def dot_prod(g1, g2, ppdp=None):
 	total = 0.0
 	for p1, p2 in zip(g1, g2):
 		if p1 is None or p2 is None:
 			continue
-		total += (p1 * p2).sum()
+		sum_ = (p1 * p2).sum()
+		total += sum_
+		# Added this so we can do analysis on per-parameter dot-products
+		if ppdp is not None:
+			norm1, norm2 = torch.norm(p1), torch.norm(p2)
+			ppdp.append((sum_/(norm1 * norm2)).item())
 	total = total.item() if isinstance(total, torch.Tensor) else total
 	return total
 
@@ -86,7 +94,8 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 					prim_dev_file =None, 
 					prim_test_file =None,
 					grad_accum_factor=8,
-					no_mlm_weight=False
+					no_mlm_weight=False,
+					dev_batch_sz=128,
 	):
 		assert save_path is not None, 'Invalid Save Path Provided for Classifier Head'
 		assert isinstance(base_task_dataset_files, dict), 'Invalid type of base_task_dataset_files. Expected array'
@@ -115,6 +124,8 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		self.grad_accum_factor = grad_accum_factor
 		self.no_mlm_weight = no_mlm_weight
 		self.MLM_grads = None
+		self.using_data_parallel = False
+		self.dev_batch_sz = dev_batch_sz # Batch Size for dev-set
 
 
 	# Sets up the weighting generator
@@ -130,7 +141,9 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		if self.alpha_generator_algo.is_meta:
 			self.options = options
 			self.dp_stats = defaultdict(list)
+			self.per_param_dp = defaultdict(list)
 			self.weight_stats = defaultdict(list)
+			self.meta_head_perfs = defaultdict(list)
 
 
 	def setup_datasets(self, base_task_dataset_files, model_name, max_seq_len, label_vocab=None, lazy=False):
@@ -147,12 +160,16 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		for idx_, fname in base_task_dataset_files.items():
 			all_samples = dataset_reader._read(fname)
 			all_sentences, all_instances = [], []
+			lens = []
 			for instance in all_samples:
 				tokens = instance.fields['tokens']
 				tokens.index(pretrain_vocab)
 				sentence = tokens.as_tensor(tokens.get_padding_lengths())['tokens']
 				all_sentences.append(sentence)
 				all_instances.append(instance)
+				lens.append(sentence.shape[0])
+			print('These are the length statistics of {}'.format(fname))
+			print('Mean = {} | Std = {} | max = {}'.format(np.mean(lens), np.std(lens), max(lens)))
 			if label_vocab is not None:
 				vocab = label_vocab
 			else:
@@ -233,6 +250,16 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 				filtered_param_list = [param for pname, param in this_classf.named_parameters() if '_text_field_embedder' not in pname]
 				param_list.extend(filtered_param_list)
 		return param_list
+	
+	def parallelize_classifiers(self):
+		if not self.using_data_parallel:
+			keys = self.datasets.keys()
+			for key in keys:
+				this_classf = getattr(self, "AuxHead-{}".format(key), None)
+				assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(key)
+				this_classf = DataParallel(this_classf, device_ids=None)
+				setattr(self, 'AuxHead-{}'.format(key), this_classf)
+		self.using_data_parallel = True
 
 	# Move the model to the appropriate devices
 	def to(self, device):
@@ -258,11 +285,15 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 				'scheduler': self.ft_lr_scheduler.state_dict() if hasattr(self, 'ft_lr_scheduler') else None,
 				'perfs': dict(self.perfs) if hasattr(self, 'perfs') else None,
 				'dp_stats': self.dp_stats if hasattr(self, 'dp_stats') else None,
-				'weight_stats': self.weight_stats if hasattr(self, 'weight_stats') else None
+				'per_param_dp': dict(self.per_param_dp) if hasattr(self, 'per_param_dp') else None,
+				'weight_stats': self.weight_stats if hasattr(self, 'weight_stats') else None,
+				'meta_head_perfs': self.meta_head_perfs if hasattr(self, 'meta_head_perfs') else None,
 			}
 		for key in self.datasets.keys():
 			this_classf = getattr(self, "AuxHead-{}".format(key), None)
 			assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(key)
+			if self.using_data_parallel:
+				this_classf = this_classf.module
 			save_dict[key] = this_classf.state_dict()
 		torch.save(
 			save_dict,
@@ -292,9 +323,15 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		primary_classifier = getattr(self, "AuxHead-{}".format(self.primary_task_id), None)
 		assert primary_classifier is not None, 'Cannot find primary task classifier head to load'
 		state_dict = torch.load(self.save_path)
-		primary_classifier.load_state_dict(state_dict[self.primary_task_id])
+		if self.using_data_parallel:
+			primary_classifier.module.load_state_dict(state_dict[self.primary_task_id])
+		else:
+			primary_classifier.load_state_dict(state_dict[self.primary_task_id])
 		primary_classifier.to(device)
-		self.base_lm_model = primary_classifier._text_field_embedder
+		if self.using_data_parallel:
+			self.base_lm_model = primary_classifier.module._text_field_embedder
+		else:
+			self.base_lm_model = primary_classifier._text_field_embedder
 
 	# Evaluate the classifier
 	def evaluate_classifier(self, set_='dev'):
@@ -324,22 +361,26 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		torch.cuda.empty_cache()
 		# reset the metrics before running new stuff
 		try:
-			_ = this_classf.get_metrics(reset=True)
+			_ = self.get_metrics(this_classf=this_classf, reset=True)
 		except:
 			print('This classifier does not need to reset metrics.')
 		this_classf.eval()
 		with torch.no_grad():
-			for samples in self.dataset_iterator(dataset):
+			for samples in self.dataset_iterator(dataset, batchsz=self.batch_sz):
 				_ = this_classf(*samples)
 		this_classf.train()
 		# Get the metrics from the classifier
-		return this_classf.get_metrics(reset=True)
+		torch.cuda.empty_cache()
+		return self.get_metrics(this_classf=this_classf, reset=True)
 
-	def get_metrics(self, reset=False):
-		this_classf = getattr(self, "AuxHead-{}".format(self.primary_task_id), None)
-		assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(key)
-		# Get the metrics from the classifier
-		return this_classf.get_metrics(reset=reset)
+	# Get metrics from a particular classifier. Defaults to the primary task classifier
+	def get_metrics(self, this_classf=None, reset=False):
+		if this_classf is None:
+			this_classf = getattr(self, "AuxHead-{}".format(self.primary_task_id), None)
+			assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(key)
+			# Get the metrics from the classifier
+		module = this_classf.module if self.using_data_parallel else this_classf
+		return module.get_metrics(reset=reset)
 
 	# Get samples for a task
 	def get_classifier_samples(self, task_id, nsamples, dataset=None):
@@ -365,16 +406,32 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		this_classf = self.learn_dev_head()
 		# Get the dev gradient here
 		dev_sent, dev_labels = self.get_classifier_samples(self.primary_task_id, self.batch_sz, dataset=self.prim_dev_dataset)
-		loss_ = this_classf(dev_sent, dev_labels)['loss']
-		gradients = torch.autograd.grad(loss_, this_classf.parameters(), allow_unused=True)
+		try:
+			loss_ = this_classf(dev_sent, dev_labels)['loss']
+			loss_ = loss_.mean() if self.using_data_parallel else loss_
+			gradients = torch.autograd.grad(loss_, this_classf.parameters(), allow_unused=True)
+		except RuntimeError as e:
+			if 'out of memory' in str(e):
+				print('| WARNING: ran out of memory, retrying batch in set_dev_head')
+				torch.cuda.empty_cache()
+				loss_ = this_classf(dev_sent, dev_labels)['loss']
+				loss_ = loss_.mean() if self.using_data_parallel else loss_
+				gradients = torch.autograd.grad(loss_, this_classf.parameters(), allow_unused=True)
+			else:
+				raise e
 		return gradients
-	
+
 	# This function resets the dev-head. We use this anytime we need a new approximation of the dev head
 	def reset_dev_head(self):
 		dev_head_name = "AuxHead-{}-{}".format('dev', self.primary_task_id)
 		this_classf = getattr(self, dev_head_name, None)
-		assert this_classf is not None, 'The dev head has to already be instantiated for this function to be called'
-		del this_classf
+		if this_classf is not None:
+# 		assert this_classf is not None, 'The dev head has to already be instantiated for this function to be called'
+			del this_classf
+		else:
+			# This means that we had to re-use the previous dev-head from past estimation because we couldn't
+			# re-estimate it.
+			print('The dev head should be not be none. Probably because of the oom')
 		setattr(self, dev_head_name, None)
 
 	def learn_dev_head(self):
@@ -394,6 +451,9 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 									dev_params, betas=eval(self.options.classf_betas),
 									weight_decay=self.options.classf_dev_wd, lr=self.options.classf_dev_lr
 								)
+			if self.using_data_parallel:
+				this_classf = DataParallel(this_classf)
+				setattr(self, head_name, this_classf)
 		else:
 			return this_classf # We train this once and re-use
 		
@@ -401,27 +461,39 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		assert dev_optim is not None, 'The optimizer for the dev head has not been instantiated'
 
 		# perform gradient descent to get the dev-head
-		samples = self.get_classifier_samples(self.primary_task_id, self.batch_sz)
+		samples = self.get_classifier_samples(self.primary_task_id, self.dev_batch_sz)
 		assert dev_params is not None, 'Dev Params should have been instantiated above'
 		prev_loss_, tol = 1e10, 1e-3
+		all_metrics = [[], [], []]
+		
 		for i in range(self.options.classf_ft_iters):
 			output = this_classf(*samples)
-			loss_ = output['loss']
+			loss_ = output['loss'].mean() if self.using_data_parallel else output['loss']
 			# This ensures that we only train the dev-head and keep the body fixed
 			grads = torch.autograd.grad(loss_, dev_params, allow_unused=True)
 			for p, g in zip(dev_params, grads):
 				assert g is not None, 'This should have a gradient'
 				p.grad = g
 			dev_optim.step()
-			metrics = this_classf.get_metrics(reset=True)
-# 			f1, acc = metrics['f1'], metrics['accuracy']
+
+			# Save performance for analysis
+			metrics = self.get_metrics(this_classf=this_classf, reset=True)
+			all_metrics[0].append(metrics['f1'])
+			all_metrics[1].append(metrics['accuracy'])
+			all_metrics[2].append(loss_.item())
+
 			if abs(loss_ - prev_loss_) < tol:
 				break
 			prev_loss_ = loss_.item()
 			del grads
 			torch.cuda.empty_cache()
+
+		# Save performance for analysis
+		self.meta_head_perfs['f1'].append(np.mean(all_metrics[0]))
+		self.meta_head_perfs['accuracy'].append(np.mean(all_metrics[1]))
+		self.meta_head_perfs['loss'].append(np.mean(all_metrics[2]))
 		return this_classf
-	
+
 	def set_mlm_grads(self, grads):
 		if grads is not None:
 			assert self.MLM_grads is None, 'Need to make sure grads are none before setting'
@@ -441,6 +513,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 				assert this_classf is not None, 'Auxiliary Classifier {} not found'.format(task_id)
 				sent_dict, labels = self.get_classifier_samples(task_id, self.batch_sz)
 				loss_ = this_classf(sent_dict, labels)['loss']
+				loss_ = loss_ if not self.using_data_parallel else loss_.mean()
 				gradients = torch.autograd.grad(loss_, this_classf.parameters(), allow_unused=True)
 				gradient_dict[task_id] = gradients
 			if not hasattr(self, 'body_params_end'):
@@ -459,7 +532,9 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 				all_tasks = self.aux_tasks + [self.primary_task_id]
 				for task_id in all_tasks:
 					task_norm = calc_norm(gradient_dict[task_id][:self.body_params_end])
-					cos_sim = dot_prod(dev_task_grads, gradient_dict[task_id][:self.body_params_end])
+					per_param_dp = []
+					cos_sim = dot_prod(dev_task_grads, gradient_dict[task_id][:self.body_params_end], ppdp=per_param_dp)
+					self.per_param_dp[task_id].append(per_param_dp)
 					cos_sim = cos_sim / (dev_norm * task_norm)
 					self.dp_stats[task_id].append(cos_sim)
 					cos_sim = (torch.zeros_like(meta_weights[task_id]) - cos_sim)  / self.grad_accum_factor
@@ -468,7 +543,6 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 					else:
 						meta_weights[task_id].grad.add_(cos_sim)
 					self.weight_stats[task_id].append((meta_weights[task_id].item(), meta_weights[task_id].grad.item(), dev_norm, task_norm, self.dp_stats[task_id][-1]))
-				print('\n')
 
 
 		total_loss = 0.0
@@ -478,6 +552,8 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 			if gradient_dict is None:
 				sent_dict, labels = self.get_classifier_samples(task_id, self.batch_sz)
 				output_dict = this_classf(sent_dict, labels)
+				if self.using_data_parallel:
+					output_dict['loss'] = output_dict['loss'].mean()
 				total_loss = total_loss + self.alpha_generator_algo[task_id]*output_dict['loss']
 				total_loss = total_loss / self.grad_accum_factor
 				total_loss.backward()
@@ -491,6 +567,8 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 						if g is None:
 							continue
 						p.grad.add_(scaling * g)
+						del g
+				del gradients
 
 	# We train the primary head. This is further finetuning on top pre-training
 	def train_primary(self, n_iters, optimizer, lr_scheduler, max_grad_norm, patience=3):
@@ -512,7 +590,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		for iter_ in range(n_iters):
 			print('Currently on Classifier Epoch {}/{}'.format(iter_ + 1, n_iters))
 			iterator = self.dataset_iterator(dataset, shuffle=True)
-			total_iters = len(dataset['tokens']) // self.batch_sz + 1
+			total_iters = math.ceil(len(dataset['tokens']) / self.batch_sz)
 			# Get the primary classifier
 			iterator = tqdm(iterator, total= total_iters, desc="Classifier Train Iterator")
 			for idx, samples in enumerate(iterator):
@@ -524,6 +602,8 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 						lr_scheduler.step()
 					optimizer.zero_grad()
 				output_dict = prim_classf(*samples)
+				if self.using_data_parallel:
+					output_dict['loss'] = output_dict['loss'].mean()
 				total_loss = output_dict['loss'] / self.grad_accum_factor
 				total_loss.backward()
 			# We want to evaluate the classifier
@@ -550,16 +630,17 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		return best_f1, best_acc, self.perfs
 
 
-	def dataset_iterator(self, dataset, shuffle=False):
+	def dataset_iterator(self, dataset, shuffle=False, batchsz=-1):
+		if batchsz < 0:
+			batchsz = self.batch_sz
 		total_egs = len(dataset['tokens'])
-		# +1 is so as to not have an off-by-1 bug
-		num_batches = total_egs // self.batch_sz + 1
+		num_batches = math.ceil(total_egs / batchsz)
 		if shuffle:
 			idxs = np.random.permutation(total_egs)
 		else:
 			idxs = list(range(total_egs))
 		for i in range(num_batches):
-			this_idxs = idxs[(i * self.batch_sz): ((i + 1) * self.batch_sz)]
+			this_idxs = idxs[(i * batchsz): ((i + 1) * batchsz)]
 			sentences = [dataset['tokens'][id_] for id_ in this_idxs]
 			labels = dataset['labels'][this_idxs]
 			sentences = collate(sentences, dataset['pad_idx'])

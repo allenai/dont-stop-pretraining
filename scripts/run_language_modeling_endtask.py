@@ -33,6 +33,7 @@ import re
 import shutil
 import pdb
 from typing import Dict, List, Tuple
+import gc
 
 import numpy as np
 import torch
@@ -108,31 +109,48 @@ class TextDataset(Dataset):
 	def __getitem__(self, item):
 		return torch.tensor(self.examples[item], dtype=torch.long)
 
+def get_tokenized_file(file_path:str, tokenizer: PreTrainedTokenizer, block_size=512, lazy=False):
+	logger.info("Creating features from dataset file at %s", file_path)
+	logger.info("Reading Line by Line")
+	lines = []
+	with open(file_path, encoding="utf-8") as f:
+		for line in f.readlines():
+			if len(line) > 0 and not line.isspace():
+				lines.append(line)
+	logger.info("Done Reading Line By Line. About to pass through the tokenize")
+	if lazy:
+		return lines
+	return tokenizer.batch_encode_plus(lines, truncation=True, add_special_tokens=True, max_length=block_size)["input_ids"]
+
 
 class LineByLineTextDataset(Dataset):
-	def __init__(self, tokenizer: PreTrainedTokenizer, args, file_path: str, block_size=512):
+	def __init__(self, tokenizer: PreTrainedTokenizer, args, lazy:bool, file_path: str, block_size=512):
 		assert os.path.isfile(file_path)
 		# Here, we do not cache the features, operating under the assumption
 		# that we will soon use fast multithreaded tokenizers from the
 		# `tokenizers` repo everywhere =)
-		logger.info("Creating features from dataset file at %s", file_path)
-
-		with open(file_path, encoding="utf-8") as f:
-			lines = [line for line in f.read().splitlines() if (len(line) > 0 and not line.isspace())]
-
-		self.examples = tokenizer.batch_encode_plus(lines, add_special_tokens=True, max_length=block_size)["input_ids"]
+		self.lazy = lazy
+		self.block_size = block_size
+		# use the lazy option when the dataset is too big to reasonably try to fit in memory as tensors
+		if lazy:
+			self.tokenizer = tokenizer
+		self.examples = get_tokenized_file(file_path, tokenizer, block_size, lazy=lazy)
 
 	def __len__(self):
 		return len(self.examples)
 
 	def __getitem__(self, i):
-		return torch.tensor(self.examples[i], dtype=torch.long)
+		tokenized = self.examples[i]
+		if self.lazy:
+			tokenized = self.tokenizer.encode_plus(tokenized, truncation=True, add_special_tokens=True, max_length=self.block_size)["input_ids"]
+		return torch.tensor(tokenized, dtype=torch.long)
 
 
 def load_and_cache_examples(args, tokenizer, evaluate=False):
 	file_path = args.eval_data_file if evaluate else args.train_data_file
 	if args.line_by_line:
-		return LineByLineTextDataset(tokenizer, args, file_path=file_path, block_size=args.block_size)
+		lazy = (not evaluate) and args.lazy_dataset
+		return LineByLineTextDataset(tokenizer, args, lazy=lazy, file_path=file_path, block_size=args.block_size)
 	else:
 		return TextDataset(tokenizer, args, file_path=file_path, block_size=args.block_size)
 
@@ -147,9 +165,7 @@ def set_seed(args):
 
 def _sorted_checkpoints(args, checkpoint_prefix="checkpoint", use_mtime=False) -> List[str]:
 	ordering_and_checkpoint_path = []
-
 	glob_checkpoints = glob.glob(os.path.join(args.output_dir, "{}-*".format(checkpoint_prefix)))
-
 	for path in glob_checkpoints:
 		if use_mtime:
 			ordering_and_checkpoint_path.append((os.path.getmtime(path), path))
@@ -236,6 +252,20 @@ def save_chkpt(args, id_, model, tokenizer, optimizer, scheduler, rotate_chkpt=T
 	torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
 	logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
+# Run a batch of data through the model whilst checking for out of memory errors
+def run_batch(model, batch, tokenizer, args, raise_oom=False):
+	try :
+		inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+		inputs = inputs.to(args.device)
+		labels = labels.to(args.device)
+		model.train()
+		outputs = model(inputs, labels=labels)
+	except RuntimeError as e:
+		if 'out of memory' in str(e) and not raise_oom:
+			print('| WARNING: ran out of memory during forward. Skipping batch')
+		torch.cuda.empty_cache()
+		return None
+	return outputs
 
 def train(
 			args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer,
@@ -244,7 +274,15 @@ def train(
 	if args.local_rank in [-1, 0]:
 		tb_writer = SummaryWriter()
 
-	args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
+	if args.n_gpu > 1:
+		# Unevenly split the batches among the gpu. Since gpu(0) is where the gradient accumulation happens
+		# we put less examples on this gpu so as to prevent out of memory error
+		this_chunks = [args.per_gpu_train_batch_size for i in range(torch.cuda.device_count())]
+		this_chunks[0] = args.base_batchsz
+		setattr(args, 'batching_chunks', this_chunks)
+		setattr(args, 'train_batch_size', sum(this_chunks))
+	else:
+		args.train_batch_size = args.per_gpu_train_batch_size
 
 	def collate(examples: List[torch.Tensor]):
 		if tokenizer._pad_token is None:
@@ -259,6 +297,7 @@ def train(
 	if args.max_steps > 0:
 		t_total = args.max_steps
 		args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
+		logger.info('The number of epochs is : {}'.format(args.num_train_epochs))
 	else:
 		t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
 
@@ -320,9 +359,12 @@ def train(
 		model, optimizer = amp.initialize(model, optimizer, opt_level=args.fp16_opt_level)
 
 	# multi-gpu training (should be after apex fp16 initialization)
+	setattr(args, 'model_is_parallel', False)
 	if args.n_gpu > 1:
-		model = torch.nn.DataParallel(model)
-
+		model = torch.nn.DataParallel(model, chunks=args.batching_chunks)
+		args.model_is_parallel = True
+		if args.parallelize_classifiers:
+			auxTaskModel.parallelize_classifiers()
 	# Distributed training (should be after apex fp16 initialization)
 	if args.local_rank != -1:
 		model = torch.nn.parallel.DistributedDataParallel(
@@ -343,7 +385,7 @@ def train(
 		* (torch.distributed.get_world_size() if args.local_rank != -1 else 1),
 	)
 	logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
-	logger.info("  Total optimization steps = %d", t_total)
+	logger.info("  Total optimization steps = {}. Will eval every {}".format(t_total, args.eval_every))
 
 	global_step = 0
 	epochs_trained = 0
@@ -373,7 +415,10 @@ def train(
 	set_seed(args)  # Added here for reproducibility
 	classifier_dev_perfs = []
 	auxTaskModel.alpha_generator_algo.prep_epoch_start(global_step)
+	early_stop = False
 	for epoch in train_iterator:
+		if early_stop:
+			break
 		weights = {k: auxTaskModel.alpha_generator_algo[k] for k in auxTaskModel.alpha_generator_algo.weights.keys()}
 		print('\nGStep = {} Weights : '.format(global_step), weights, '\n')
 		epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
@@ -382,56 +427,62 @@ def train(
 			train_sampler.set_epoch(epoch)
 
 		for step, batch in enumerate(epoch_iterator):
-			# TODO [ldery] - call epoch start for the alpha_generator
 			# Skip past any already trained steps if resuming training
 			if steps_trained_in_current_epoch > 0:
 				steps_trained_in_current_epoch -= 1
 				continue
-			inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
-			inputs = inputs.to(args.device)
-			labels = labels.to(args.device)
-			model.train()
-			outputs = model(inputs, labels=labels)
-			loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
-			# Store the gradients for the meta-learner
-			if auxTaskModel.alpha_generator_algo.is_meta:
-				gradients = torch.autograd.grad(loss, model.parameters(), retain_graph=True, allow_unused=True)
-				auxTaskModel.set_mlm_grads(gradients)
-			scale = 0 if args.no_mlm_weight else auxTaskModel.alpha_generator_algo["MLM"]
-			loss = loss * scale
-			if args.n_gpu > 1:
-				loss = loss.mean()  # mean() to average on multi-gpu parallel training
-			grad_accum_factor = 1
-			if args.gradient_accumulation_steps > 1:
-				loss = loss / args.gradient_accumulation_steps
-				grad_accum_factor = args.gradient_accumulation_steps
+			outputs = run_batch(model, batch, tokenizer, args)
+			# This returns none if we aren't able to process the batch even after clearing
+			# the cuda cache after an out of memory erorr and re-trying
+			if outputs is not None:
+				loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+				# Store the gradients for the meta-learner
+				if args.n_gpu > 1:
+					loss = loss.mean()  # mean() to average on multi-gpu parallel training
+				if auxTaskModel.alpha_generator_algo.is_meta:
+					gradients = torch.autograd.grad(loss, model.parameters(), retain_graph=True, allow_unused=True)
+					auxTaskModel.set_mlm_grads(gradients)
+				scale = 0 if args.no_mlm_weight else auxTaskModel.alpha_generator_algo["MLM"]
+				loss = loss * scale
+				grad_accum_factor = 1
+				if args.gradient_accumulation_steps > 1:
+					loss = loss / args.gradient_accumulation_steps
+					grad_accum_factor = args.gradient_accumulation_steps
 
-			if args.fp16:
-				with amp.scale_loss(loss, optimizer) as scaled_loss:
-					scaled_loss.backward()
-			else:
-				try:
-					loss.backward()
-				except RuntimeError as e:
-					print(' | Experienced a runtime error')
-					del loss
-					torch.cuda.empty_cache()
-					if 'out of memory' in str(e):
-						print('| WARNING: ran out of memory, retrying batch')
-						# Redo the loss
-						loss = model(inputs, labels=labels)[0]
-						if args.n_gpu > 1:
-							loss = loss.mean()  # mean() to average on multi-gpu parallel training
-						loss = loss / grad_accum_factor
-						loss.backward()
-					else:
-						raise e
+				if args.fp16:
+					with amp.scale_loss(loss, optimizer) as scaled_loss:
+						scaled_loss.backward()
+				else:
+					reached_sample_grad = False
+					try:
+						if not auxTaskModel.alpha_generator_algo.is_meta:
+							loss.backward()
+						else:
+							assert gradients is not None, ' Gradients should be set by now'
+							scale = auxTaskModel.alpha_generator_algo["MLM"] / args.gradient_accumulation_steps
+							with torch.no_grad():
+								for (p, g) in zip(model.parameters(), gradients):
+									if p.grad is None:
+										p.grad = torch.zeros_like(p)
+									p.grad.add_(g * scale)
+									del g
+							torch.cuda.empty_cache()
 
-			tr_loss += loss.item()
-			auxTaskModel.classifier_sample_grad()
-			if auxTaskModel.alpha_generator_algo.is_meta:
-				# Zero-out the MLM grads because we are done with them at the moment
-				auxTaskModel.set_mlm_grads(None)
+						tr_loss += loss.item()
+						reached_sample_grad = True
+						auxTaskModel.classifier_sample_grad()
+					except RuntimeError as e:
+						if 'out of memory' in str(e) and not reached_sample_grad:
+							print('| WARNING: ran out of memory during backward. Skipping Batch')
+						if 'out of memory' in str(e):
+							print('| WARNING: ran out of memory during sample grad. Skipping Batch')
+						else:
+							print('| WARNING: crashed but not due to memory error')
+						torch.cuda.empty_cache()
+
+				if auxTaskModel.alpha_generator_algo.is_meta:
+					# Zero-out the MLM grads because we are done with them at the moment
+					auxTaskModel.set_mlm_grads(None)
 			if (step + 1) % args.gradient_accumulation_steps == 0:
 				if args.fp16:
 					torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
@@ -453,8 +504,8 @@ def train(
 					# Reset the dev head and updated the meta-weights
 					auxTaskModel.reset_dev_head()
 					auxTaskModel.alpha_generator_algo.update_meta_weights()
+				torch.cuda.empty_cache()
 				# Irregularly report the end of the epoch to save having to do the 
-
 				if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
 					# Log metrics
 					if (
@@ -471,7 +522,11 @@ def train(
 					
 					save_chkpt(args, str(global_step), model, tokenizer, optimizer, scheduler, rotate_chkpt=True)
 				
-				if global_step % int(t_total * 0.05) == 0:
+				if global_step % (args.eval_every // 2) == 0:
+					weights = {k: auxTaskModel.alpha_generator_algo[k] for k in auxTaskModel.alpha_generator_algo.weights.keys()}
+					print('\nGStep = {} Weights : '.format(global_step), weights, '\n')
+
+				if global_step % args.eval_every == 0:
 					train_metrics = auxTaskModel.get_metrics(reset=True)
 					dev_metrics = auxTaskModel.evaluate_classifier(set_='dev')
 					test_metrics = auxTaskModel.evaluate_classifier(set_='test')
@@ -494,6 +549,7 @@ def train(
 						if recent_max < max_:
 							print('Stopping Early at Epoch {} because No Improvement in Dev Set Accuracy'.format(epoch))
 							train_iterator.close()
+							early_stop = True
 							break
 
 			if args.max_steps > 0 and global_step > args.max_steps:
@@ -517,7 +573,11 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
 	if args.local_rank in [-1, 0]:
 		os.makedirs(eval_output_dir, exist_ok=True)
 
-	args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
+	if args.n_gpu > 1:
+		assert hasattr(args, 'batching_chunks'), 'Batching Chunks is supposed to be set already'
+		args.eval_batch_size = sum(args.batching_chunks)
+	else:
+		args.eval_batch_size = args.per_gpu_eval_batch_size
 	# Note that DistributedSampler samples randomly
 
 	def collate(examples: List[torch.Tensor]):
@@ -531,7 +591,7 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
 	)
 
 	# multi-gpu evaluate
-	if args.n_gpu > 1:
+	if args.n_gpu > 1 and not args.model_is_parallel:
 		model = torch.nn.DataParallel(model)
 
 	# Eval!
@@ -544,6 +604,8 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
 
 	for batch in tqdm(eval_dataloader, desc="Evaluating"):
 		inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
+		if labels.shape[0] != args.eval_batch_size:
+			continue
 		inputs = inputs.to(args.device)
 		labels = labels.to(args.device)
 
@@ -710,6 +772,34 @@ def main():
 		type=str,
 		help='Name of file for master task'
 	)
+	
+	parser.add_argument(
+		"--lazy-dataset",
+		action='store_true',
+	)
+	
+	parser.add_argument(
+		"--parallelize_classifiers",
+		action='store_true'
+	)
+				
+	parser.add_argument(
+		"--eval_every",
+		type=int,
+		default=50
+	)
+	
+	parser.add_argument(
+		"--base_batchsz",
+		type=int,
+		default=6
+	)
+	
+	parser.add_argument(
+		"--no_final_finetuning",
+		action='store_true',
+		help='turns off further task-specific finetuing'
+	)
 
 	# Begin Change [ldery]
 	# Weighting Algorithm Specifics
@@ -720,6 +810,7 @@ def main():
 	parser.add_argument('--init-val', type=float, default=0.0, help='Initial Task weightings')
 	parser.add_argument('--end-val', type=float, default=1.0, help='Final task weightings')
 	parser.add_argument('--meta-lr-weight', type=float, default=0.01, help='learning rate for meta-learning')
+	parser.add_argument('--dev_batch_sz', type=int, default=128, help='Batch sz for dev-set for meta-learning')
 
 
 	parser.add_argument("--classf_warmup_frac", type=float, default=0.06)
@@ -729,7 +820,7 @@ def main():
 	parser.add_argument("--classf_dev_wd", type=float, default=0.1)
 	parser.add_argument("--base_wd", type=float, default=0.01)
 	parser.add_argument("--classf_patience", type=int, default=5)
-	parser.add_argument("--classf_max_seq_len", type=int, default=384)
+	parser.add_argument("--classf_max_seq_len", type=int, default=512)
 	parser.add_argument("--classf_lr", type=float, default=2e-5, help="Learning rate of classifier")
 	parser.add_argument("--classf_ft_lr", type=float, default=2e-6, help="Learning rate of classifier for finetuning")
 	parser.add_argument("--classf_ft_iters", type=int, default=10, help='Number of finetuning iterations')
@@ -865,15 +956,20 @@ def main():
 	model_name = args.model_name_or_path
 	assert model_name, 'The name of the model is not Set. Maybe use roberta-base as the default'
 	os.makedirs(args.output_dir, exist_ok=True)
+	
+	# Setting up the dataset
+	train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
 
 	# Instantiate the model with the auxiliary tasks
+	logger.info("Instantiating AuxTaskModel")
 	base_task_dataset_files = get_auxtask_files(args.primary_task_id)
 	auxTaskModel = ModelWithAuxTasks(
 										model_name, model, base_task_dataset_files, max_seq_len=args.classf_max_seq_len,
 										alpha_generator_algo=args.alpha_update_algo, primary_task_id=args.primary_task_id,
 										dropout=args.classifier_dropout, prim_test_file=args.test_task_file, batch_sz=args.classf_iter_batchsz,
 										prim_dev_file=args.dev_task_file, save_path=os.path.join(args.output_dir, 'modelWAuxTasks.pth'),
-										grad_accum_factor=args.gradient_accumulation_steps, no_mlm_weight=args.no_mlm_weight
+										grad_accum_factor=args.gradient_accumulation_steps, no_mlm_weight=args.no_mlm_weight,
+										dev_batch_sz=args.dev_batch_sz
 									)
 	# Move the model to the appropriate device
 	model.to(args.device)
@@ -887,61 +983,71 @@ def main():
 
 	# Training
 	if args.do_train:
+		logger.info("Getting dataset")
 		if args.local_rank not in [-1, 0]:
 			# Barrier to make sure only the first process in distributed training process the dataset,
 			# and the others will use the cache
 			torch.distributed.barrier()
-		train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
+# 		train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
 
 		if args.local_rank == 0:
 			torch.distributed.barrier()
 		
+		logger.info("Run Training")
 		if not args.only_run_classifier:
 			global_step, tr_loss = train(args, train_dataset, model, tokenizer, auxTaskModel=auxTaskModel)
 			logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 			# Saving the visualization
-			auxTaskModel.alpha_generator_algo.viz_results(args.output_dir, group_aux=(not args.meta_learn_aux))
+			try:
+				auxTaskModel.alpha_generator_algo.viz_results(args.output_dir, group_aux=(not args.meta_learn_aux))
+			except:
+				logger.info("Unable to generate result visualization")
 		# We want to now do the training for aux-model-independently
-		all_f1s, all_accs = [], []
-		auxTaskModel.load_primary(args.device)
-		test_metrics = auxTaskModel.evaluate_classifier(set_='test')
-		dev_metrics = auxTaskModel.evaluate_classifier(set_='dev')
-		print('Before Training. Dev  (F1={:.3f}, Accuracy={:.3f})'.format(dev_metrics['f1'], dev_metrics['accuracy']))
-		print('Before Training. Test (F1={:.3f}, Accuracy={:.3f})'.format(test_metrics['f1'], test_metrics['accuracy']))
-		no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight", "layer_norm.weight"]
-		for i in range(args.n_runs_classf):
-			torch.cuda.empty_cache()
-			args.seed = i
-			set_seed(args)
-			print('Currently working on seed : {}/{}'.format(i + 1,  args.n_runs_classf))
-			print('Loading the saved model that performed best on primary task')
+			# multi-gpu training (should be after apex fp16 initialization)
+		if not args.no_final_finetuning:
+			all_f1s, all_accs = [], []
 			auxTaskModel.load_primary(args.device)
-			# Setup an optimizer for the classifier
-			classifier_params = auxTaskModel.get_classifier_params(keys=[auxTaskModel.primary_task_id], withbase=True)
-			optimizer_grouped_parameters = [
-				{
-					"params": [p for n, p in classifier_params if not any(nd in n for nd in no_decay)],
-					"weight_decay": args.weight_decay,
-				},
-				{"params": [p for n, p in classifier_params if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
-			]
-			this_optim = AdamW(
-										optimizer_grouped_parameters, betas=eval(args.classf_betas),
-										weight_decay=args.classf_wd, lr=args.classf_ft_lr
-									)
-			
-			# Todo [ldery] - maybe you should put back lr scheduling. Do hyperparam on this
-			this_lr_scheduler = None 
-			best_f1, best_acc, perfs  = auxTaskModel.train_primary(args.classf_ft_iters, this_optim, this_lr_scheduler, args.max_grad_norm, patience=args.classf_ft_patience)
-			print('Run {}. Final Test (F1={:.3f}, Accuracy={:.3f})'.format(i, best_f1, best_acc))
-			pickle.dump(perfs, open(os.path.join(args.output_dir, 'ftmodel.{}.perf.pkl'.format(i)), 'wb') )
-			all_f1s.append(best_f1)
-			all_accs.append(best_acc)
+			test_metrics = auxTaskModel.evaluate_classifier(set_='test')
+			dev_metrics = auxTaskModel.evaluate_classifier(set_='dev')
+			print('Before Training. Dev  (F1={:.3f}, Accuracy={:.3f})'.format(dev_metrics['f1'], dev_metrics['accuracy']))
+			print('Before Training. Test (F1={:.3f}, Accuracy={:.3f})'.format(test_metrics['f1'], test_metrics['accuracy']))
+			no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight", "layer_norm.weight"]
+			for i in range(args.n_runs_classf):
+				torch.cuda.empty_cache()
+				args.seed = i
+				set_seed(args)
+				print('Currently working on seed : {}/{}'.format(i + 1,  args.n_runs_classf))
+				print('Loading the saved model that performed best on primary task')
+				auxTaskModel.load_primary(args.device)
+				# Setup an optimizer for the classifier
+				classifier_params = auxTaskModel.get_classifier_params(keys=[auxTaskModel.primary_task_id], withbase=True)
+				optimizer_grouped_parameters = [
+					{
+						"params": [p for n, p in classifier_params if not any(nd in n for nd in no_decay)],
+						"weight_decay": args.weight_decay,
+					},
+					{"params": [p for n, p in classifier_params if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
+				]
+				this_optim = AdamW(
+											optimizer_grouped_parameters, betas=eval(args.classf_betas),
+											weight_decay=args.classf_wd, lr=args.classf_ft_lr
+										)
 
-		all_accs, all_f1s = np.array(all_accs), np.array(all_f1s)
-		print("Test F1 - {:3f} +/ {:.3f}".format(all_f1s.mean(), all_f1s.std()))
-		print("Test Ac - {:3f} +/ {:.3f}".format(all_accs.mean(), all_accs.std()))
-		pickle.dump([all_accs, all_f1s], open(os.path.join(args.output_dir, 'ftmodel.bestperfs.pkl'.format(i)), 'wb') )
+				# Todo [ldery] - maybe you should put back lr scheduling. Do hyperparam on this
+				if args.n_gpu > 1 and args.parallelize_classifiers:
+					auxTaskModel.parallelize_classifiers()
+
+				this_lr_scheduler = None
+				best_f1, best_acc, perfs  = auxTaskModel.train_primary(args.classf_ft_iters, this_optim, this_lr_scheduler, args.max_grad_norm, patience=args.classf_ft_patience)
+				print('Run {}. Final Test (F1={:.3f}, Accuracy={:.3f})'.format(i, best_f1, best_acc))
+				pickle.dump(perfs, open(os.path.join(args.output_dir, 'ftmodel.{}.perf.pkl'.format(i)), 'wb') )
+				all_f1s.append(best_f1)
+				all_accs.append(best_acc)
+
+			all_accs, all_f1s = np.array(all_accs), np.array(all_f1s)
+			print("Test F1 - {:3f} +/ {:.3f}".format(all_f1s.mean(), all_f1s.std()))
+			print("Test Ac - {:3f} +/ {:.3f}".format(all_accs.mean(), all_accs.std()))
+			pickle.dump([all_accs, all_f1s], open(os.path.join(args.output_dir, 'ftmodel_{}.bestperfs.pkl'.format(args.seed)), 'wb') )
 
 	# Saving best-practices: if you use save_pretrained for the model and tokenizer,
 	# you can reload them using from_pretrained()
