@@ -123,7 +123,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		self.prim_test_dataset = None
 		self.grad_accum_factor = grad_accum_factor
 		self.no_mlm_weight = no_mlm_weight
-		self.MLM_grads = None
+		self.MLM_grads = defaultdict(list)
 		self.using_data_parallel = False
 		self.dev_batch_sz = dev_batch_sz # Batch Size for dev-set
 
@@ -132,7 +132,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 	def setup_alpha_generator(self, options):
 		# Create a special task called MLM.
 		task_names = list(self.base_task_dataset_files.keys())
-		task_names.append("MLM")
+		task_names.extend(options.aux_task_names)
 		# Remove the primary task name
 		aux_tasks = [x for x in task_names if x != self.primary_task_id]
 		self.aux_tasks = aux_tasks
@@ -494,12 +494,12 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		self.meta_head_perfs['loss'].append(np.mean(all_metrics[2]))
 		return this_classf
 
-	def set_mlm_grads(self, grads):
+	def set_mlm_grads(self, grads, aux_task_name='MLM'):
 		if grads is not None:
 			assert self.MLM_grads is None, 'Need to make sure grads are none before setting'
 		else:
 			assert self.MLM_grads is not None, 'Need to make sure grads are set before setting to none'
-		self.MLM_grads = grads
+		self.MLM_grads[aux_task_name] = grads
 
 	# Calculate the gradient for the classifier and lm
 	def classifier_sample_grad(self):
@@ -521,7 +521,8 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 			
 			# Get the MLM current gradient. Double check that the MLM gradient is set correctly
 			assert self.MLM_grads is not None, 'MLM Grads should have been set by now'
-			gradient_dict["MLM"] = self.MLM_grads[:self.body_params_end]
+			for key, grad_list in self.MLM_grads.items():
+				gradient_dict[key] = grad_list[:self.body_params_end]
 
 			# Get the gradient dictionary
 			gradient_dict["dev-{}".format(self.primary_task_id)] = self.set_dev_head()

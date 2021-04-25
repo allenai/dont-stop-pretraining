@@ -147,12 +147,17 @@ class LineByLineTextDataset(Dataset):
 
 
 def load_and_cache_examples(args, tokenizer, evaluate=False):
-	file_path = args.eval_data_file if evaluate else args.train_data_file
-	if args.line_by_line:
-		lazy = (not evaluate) and args.lazy_dataset
-		return LineByLineTextDataset(tokenizer, args, lazy=lazy, file_path=file_path, block_size=args.block_size)
-	else:
-		return TextDataset(tokenizer, args, file_path=file_path, block_size=args.block_size)
+	file_paths = args.eval_data_file if evaluate else args.train_data_file
+	assert len(args.train_data_file) == len(args.aux_task_names), 'Mismatch between the number of train files for MLM and the number of aux task names'
+	datasets = {}
+	for idx, file_path in enumerate(file_paths):
+		task_name = args.aux_task_names[idx]
+		if args.line_by_line:
+			lazy = (not evaluate) and args.lazy_dataset
+			datasets[task_name] = LineByLineTextDataset(tokenizer, args, lazy=lazy, file_path=file_path, block_size=args.block_size)
+		else:
+			datasets[task_name] = TextDataset(tokenizer, args, file_path=file_path, block_size=args.block_size)
+	return datasets
 
 
 def set_seed(args):
@@ -253,7 +258,7 @@ def save_chkpt(args, id_, model, tokenizer, optimizer, scheduler, rotate_chkpt=T
 	logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
 # Run a batch of data through the model whilst checking for out of memory errors
-def run_batch(model, batch, tokenizer, args, raise_oom=False):
+def run_batch(model, batch, tokenizer, args, try_again=True):
 	try :
 		inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
 		inputs = inputs.to(args.device)
@@ -261,11 +266,70 @@ def run_batch(model, batch, tokenizer, args, raise_oom=False):
 		model.train()
 		outputs = model(inputs, labels=labels)
 	except RuntimeError as e:
-		if 'out of memory' in str(e) and not raise_oom:
-			print('| WARNING: ran out of memory during forward. Skipping batch')
+		if 'out of memory' in str(e):
+			if try_again:
+				print('| WARNING: ran out of memory during forward. Trying batch again')
+			else:
+				print('| WARNING: ran out of memory during forward. Skipping batch since this is second try')
 		torch.cuda.empty_cache()
-		return None
+		if not try_again:
+			return None
+		else:
+			run_batch(model, batch, tokenizer, args, try_again=False)
 	return outputs
+
+# Process a batch of data for a particular task
+def process_task_batch(auxTaskModel, model, batch, tokenizer, args, task_name, sample_prim_grad=False):
+	outputs = run_batch(model, batch, tokenizer, args)
+	# This returns none if we aren't able to process the batch even after clearing
+	# the cuda cache after an out of memory erorr and re-trying
+	if outputs is not None:
+		loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+		# Store the gradients for the meta-learner
+		if args.n_gpu > 1:
+			loss = loss.mean()  # mean() to average on multi-gpu parallel training
+		if auxTaskModel.alpha_generator_algo.is_meta:
+			gradients = torch.autograd.grad(loss, model.parameters(), retain_graph=True, allow_unused=True)
+			auxTaskModel.set_mlm_grads(gradients, aux_task_name=task_name)
+		scale = 0 if args.no_mlm_weight else auxTaskModel.alpha_generator_algo[task_name]
+		loss = loss * scale
+		grad_accum_factor = 1
+		if args.gradient_accumulation_steps > 1:
+			loss = loss / args.gradient_accumulation_steps
+			grad_accum_factor = args.gradient_accumulation_steps
+
+		if args.fp16:
+			with amp.scale_loss(loss, optimizer) as scaled_loss:
+				scaled_loss.backward()
+		else:
+			reached_sample_grad = False
+			try:
+				if not auxTaskModel.alpha_generator_algo.is_meta:
+					loss.backward()
+				else:
+					assert gradients is not None, ' Gradients should be set by now'
+					scale = auxTaskModel.alpha_generator_algo[task_name] / args.gradient_accumulation_steps
+					with torch.no_grad():
+						for (p, g) in zip(model.parameters(), gradients):
+							if p.grad is None:
+								p.grad = torch.zeros_like(p)
+							p.grad.add_(g * scale)
+							del g
+					torch.cuda.empty_cache()
+
+				tr_loss += loss.item()
+				if sample_prim_grad: # Note that we must call this after all the auxiliary tasks have been run
+					reached_sample_grad = True
+					auxTaskModel.classifier_sample_grad()
+			except RuntimeError as e:
+				if 'out of memory' in str(e) and not reached_sample_grad:
+					print('| WARNING: ran out of memory during backward. Skipping Batch')
+				if 'out of memory' in str(e):
+					print('| WARNING: ran out of memory during sample grad. Skipping Batch')
+				else:
+					print('| WARNING: crashed but not due to memory error')
+				torch.cuda.empty_cache()
+
 
 def train(
 			args, train_dataset, model: PreTrainedModel, tokenizer: PreTrainedTokenizer,
@@ -289,17 +353,24 @@ def train(
 			return pad_sequence(examples, batch_first=True)
 		return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
 
-	train_sampler = RandomSampler(train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
-	train_dataloader = DataLoader(
-		train_dataset, sampler=train_sampler, batch_size=args.train_batch_size, collate_fn=collate
-	)
+	train_dataloader = {}
+	max_dataset_len, largest_dataset_name = -1, None
+	for task_name, dataset in train_dataset.items():
+		train_sampler = RandomSampler(dataset) if args.local_rank == -1 else DistributedSampler(dataset)
+		# Todo [ldery] - need to investigate if I need different batch sizes for the different tasks. Probably not
+		train_dataloader[task_name] = DataLoader(
+			dataset, sampler=train_sampler, batch_size=args.train_batch_size, collate_fn=collate
+		)
+		if max_dataset_len < len(dataset):
+			max_dataset_len = len(dataset)
+			largest_dataset_name = task_name
 
 	if args.max_steps > 0:
 		t_total = args.max_steps
-		args.num_train_epochs = args.max_steps // (len(train_dataloader) // args.gradient_accumulation_steps) + 1
+		args.num_train_epochs = args.max_steps // (max_dataset_len // args.gradient_accumulation_steps) + 1
 		logger.info('The number of epochs is : {}'.format(args.num_train_epochs))
 	else:
-		t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
+		t_total = max_dataset_len // args.gradient_accumulation_steps * args.num_train_epochs
 
 	model = model.module if hasattr(model, "module") else model  # Take care of distributed/parallel training
 	model.resize_token_embeddings(len(tokenizer))
@@ -375,7 +446,8 @@ def train(
 
 	# Train!
 	logger.info("***** Running training *****")
-	logger.info("  Num examples = %d", len(train_dataset))
+	for k, v in train_dataset.items():
+		logger.info(" Task= {} Num examples = {}".format(k, len(v)))
 	logger.info("  Num Epochs = %d", args.num_train_epochs)
 	logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
 	logger.info(
@@ -396,8 +468,8 @@ def train(
 			# set global_step to gobal_step of last saved checkpoint from model path
 			checkpoint_suffix = args.model_name_or_path.split("-")[-1].split("/")[0]
 			global_step = int(checkpoint_suffix)
-			epochs_trained = global_step // (len(train_dataloader) // args.gradient_accumulation_steps)
-			steps_trained_in_current_epoch = global_step % (len(train_dataloader) // args.gradient_accumulation_steps)
+			epochs_trained = global_step // (max_dataset_len // args.gradient_accumulation_steps)
+			steps_trained_in_current_epoch = global_step % (max_dataset_len // args.gradient_accumulation_steps)
 
 			logger.info("  Continuing training from checkpoint, will skip to saved global_step")
 			logger.info("  Continuing training from epoch %d", epochs_trained)
@@ -421,7 +493,14 @@ def train(
 			break
 		weights = {k: auxTaskModel.alpha_generator_algo[k] for k in auxTaskModel.alpha_generator_algo.weights.keys()}
 		print('\nGStep = {} Weights : '.format(global_step), weights, '\n')
-		epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
+		epoch_iterator = tqdm(train_dataloader[largest_dataset_name], desc="Iteration", disable=args.local_rank not in [-1, 0])\
+		
+		# Setup Iterators for the other tasks
+		aux_task_iterators = {}
+		for task_id, task_data in train_dataloader.items():
+			if task_id == largest_dataset_name:
+				continue
+			aux_task_iterators[task_id] = iter(task_data)
 
 		if args.local_rank != -1:
 			train_sampler.set_epoch(epoch)
@@ -431,58 +510,24 @@ def train(
 			if steps_trained_in_current_epoch > 0:
 				steps_trained_in_current_epoch -= 1
 				continue
-			outputs = run_batch(model, batch, tokenizer, args)
-			# This returns none if we aren't able to process the batch even after clearing
-			# the cuda cache after an out of memory erorr and re-trying
-			if outputs is not None:
-				loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
-				# Store the gradients for the meta-learner
-				if args.n_gpu > 1:
-					loss = loss.mean()  # mean() to average on multi-gpu parallel training
-				if auxTaskModel.alpha_generator_algo.is_meta:
-					gradients = torch.autograd.grad(loss, model.parameters(), retain_graph=True, allow_unused=True)
-					auxTaskModel.set_mlm_grads(gradients)
-				scale = 0 if args.no_mlm_weight else auxTaskModel.alpha_generator_algo["MLM"]
-				loss = loss * scale
-				grad_accum_factor = 1
-				if args.gradient_accumulation_steps > 1:
-					loss = loss / args.gradient_accumulation_steps
-					grad_accum_factor = args.gradient_accumulation_steps
 
-				if args.fp16:
-					with amp.scale_loss(loss, optimizer) as scaled_loss:
-						scaled_loss.backward()
-				else:
-					reached_sample_grad = False
-					try:
-						if not auxTaskModel.alpha_generator_algo.is_meta:
-							loss.backward()
-						else:
-							assert gradients is not None, ' Gradients should be set by now'
-							scale = auxTaskModel.alpha_generator_algo["MLM"] / args.gradient_accumulation_steps
-							with torch.no_grad():
-								for (p, g) in zip(model.parameters(), gradients):
-									if p.grad is None:
-										p.grad = torch.zeros_like(p)
-									p.grad.add_(g * scale)
-									del g
-							torch.cuda.empty_cache()
+			process_task_batch(auxTaskModel, model, batch, tokenizer, args, largest_dataset_name, sample_prim_grad=False)
+			other_tasks = list(set(args.aux_task_names) - set([largest_dataset_name]))
+			for task_id, task_name in enumerate(other_tasks):
+				other_batch = next(aux_task_iterators[task_name], None)
+				if other_batch is None:
+					aux_task_iterators[task_name] = iter(train_dataloader[task_name])
+					other_batch = next(aux_task_iterators[task_name], None)
+				assert other_batch is not None, 'We should have more data for {} since we have reset the iterator'.format(task_name)
+				is_last_task = task_id == (len(other_tasks) - 1)
+				process_task_batch(auxTaskModel, model, other_batch, tokenizer, args, task_id, sample_prim_grad=is_last_task)
 
-						tr_loss += loss.item()
-						reached_sample_grad = True
-						auxTaskModel.classifier_sample_grad()
-					except RuntimeError as e:
-						if 'out of memory' in str(e) and not reached_sample_grad:
-							print('| WARNING: ran out of memory during backward. Skipping Batch')
-						if 'out of memory' in str(e):
-							print('| WARNING: ran out of memory during sample grad. Skipping Batch')
-						else:
-							print('| WARNING: crashed but not due to memory error')
-						torch.cuda.empty_cache()
+			# Todo (ldery) - run batches of the different through the model and do all the necessary gradient computation
+			if auxTaskModel.alpha_generator_algo.is_meta:
+				# Zero-out the MLM grads because we are done with them at the moment
+				for task_name in args.aux_task_names:
+					auxTaskModel.set_mlm_grads(None, aux_task_name=task_name)
 
-				if auxTaskModel.alpha_generator_algo.is_meta:
-					# Zero-out the MLM grads because we are done with them at the moment
-					auxTaskModel.set_mlm_grads(None)
 			if (step + 1) % args.gradient_accumulation_steps == 0:
 				if args.fp16:
 					torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
@@ -569,6 +614,8 @@ def evaluate(args, model: PreTrainedModel, tokenizer: PreTrainedTokenizer, prefi
 	eval_output_dir = args.output_dir
 
 	eval_dataset = load_and_cache_examples(args, tokenizer, evaluate=True)
+	# Just use the first dataset for evaluation - doesn't really matter just doing this so things don't crash.
+	eval_dataset = eval_dataset[list(eval_dataset.keys())[0]]
 
 	if args.local_rank in [-1, 0]:
 		os.makedirs(eval_output_dir, exist_ok=True)
@@ -635,7 +682,10 @@ def main():
 
 	# Required parameters
 	parser.add_argument(
-		"--train_data_file", default=None, type=str, required=True, help="The input training data file (a text file)."
+		"--train_data_file", nargs='+', default=None, type=str, required=True, help="The input training data file (a text file)."
+	)
+	parser.add_argument(
+		"--aux-task-names", nargs='+', default=None, type=str, help="The names of the auxiliary tasks"
 	)
 	parser.add_argument(
 		"--output_dir",
@@ -651,6 +701,7 @@ def main():
 	parser.add_argument(
 		"--eval_data_file",
 		default=None,
+		nargs='+',
 		type=str,
 		help="An optional input evaluation data file to evaluate the perplexity on (a text file).",
 	)
@@ -988,7 +1039,6 @@ def main():
 			# Barrier to make sure only the first process in distributed training process the dataset,
 			# and the others will use the cache
 			torch.distributed.barrier()
-# 		train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
 
 		if args.local_rank == 0:
 			torch.distributed.barrier()
