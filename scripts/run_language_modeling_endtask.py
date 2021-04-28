@@ -258,31 +258,37 @@ def save_chkpt(args, id_, model, tokenizer, optimizer, scheduler, rotate_chkpt=T
 	logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
 # Run a batch of data through the model whilst checking for out of memory errors
-def run_batch(model, batch, tokenizer, args, try_again=True):
+def run_batch(model, batch, tokenizer, args, task_name, try_again=False):
 	try :
 		inputs, labels = mask_tokens(batch, tokenizer, args) if args.mlm else (batch, batch)
 		inputs = inputs.to(args.device)
 		labels = labels.to(args.device)
 		model.train()
-		outputs = model(inputs, labels=labels)
+		outputs = model(inputs, labels=labels, head_name=task_name)
 	except RuntimeError as e:
+		pdb.set_trace()
+		gc.collect()
 		if 'out of memory' in str(e):
 			if try_again:
 				print('| WARNING: ran out of memory during forward. Trying batch again')
 			else:
-				print('| WARNING: ran out of memory during forward. Skipping batch since this is second try')
+				print('| WARNING: ran out of memory during forward. Skipping batch')
+		else:
+			print('Run into this new error : ', str(e))
 		torch.cuda.empty_cache()
 		if not try_again:
 			return None
 		else:
-			run_batch(model, batch, tokenizer, args, try_again=False)
+			outputs = run_batch(model, batch, tokenizer, args, task_name, try_again=False)
 	return outputs
 
 # Process a batch of data for a particular task
 def process_task_batch(auxTaskModel, model, batch, tokenizer, args, task_name, sample_prim_grad=False):
-	outputs = run_batch(model, batch, tokenizer, args)
+	outputs = run_batch(model, batch, tokenizer, args, task_name)
+
 	# This returns none if we aren't able to process the batch even after clearing
 	# the cuda cache after an out of memory erorr and re-trying
+	loss_ = 0
 	if outputs is not None:
 		loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
 		# Store the gradients for the meta-learner
@@ -311,13 +317,15 @@ def process_task_batch(auxTaskModel, model, batch, tokenizer, args, task_name, s
 					scale = auxTaskModel.alpha_generator_algo[task_name] / args.gradient_accumulation_steps
 					with torch.no_grad():
 						for (p, g) in zip(model.parameters(), gradients):
+							if g is None:
+								continue
 							if p.grad is None:
 								p.grad = torch.zeros_like(p)
 							p.grad.add_(g * scale)
 							del g
 					torch.cuda.empty_cache()
 
-				tr_loss += loss.item()
+				loss_ = loss.item()
 				if sample_prim_grad: # Note that we must call this after all the auxiliary tasks have been run
 					reached_sample_grad = True
 					auxTaskModel.classifier_sample_grad()
@@ -328,7 +336,9 @@ def process_task_batch(auxTaskModel, model, batch, tokenizer, args, task_name, s
 					print('| WARNING: ran out of memory during sample grad. Skipping Batch')
 				else:
 					print('| WARNING: crashed but not due to memory error')
+				gc.collect()
 				torch.cuda.empty_cache()
+	return loss_
 
 
 def train(
@@ -349,6 +359,13 @@ def train(
 		args.train_batch_size = args.per_gpu_train_batch_size
 
 	def collate(examples: List[torch.Tensor]):
+		# Try to balance the examples across the gpus
+		lens = [len(x) for x in examples]
+		order = np.argsort(lens)
+		new_order, order = (order[:args.base_batchsz]).tolist(), order[args.base_batchsz:]
+		for idx_ in range(args.n_gpu):
+			new_order.extend(order[idx_::args.n_gpu])
+		examples = [examples[x] for x in new_order]
 		if tokenizer._pad_token is None:
 			return pad_sequence(examples, batch_first=True)
 		return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
@@ -357,9 +374,9 @@ def train(
 	max_dataset_len, largest_dataset_name = -1, None
 	for task_name, dataset in train_dataset.items():
 		train_sampler = RandomSampler(dataset) if args.local_rank == -1 else DistributedSampler(dataset)
-		# Todo [ldery] - need to investigate if I need different batch sizes for the different tasks. Probably not
+		bsz_ = args.train_batch_size #args.classf_iter_batchsz if 'TAPT' in task_name else args.train_batch_size
 		train_dataloader[task_name] = DataLoader(
-			dataset, sampler=train_sampler, batch_size=args.train_batch_size, collate_fn=collate
+			dataset, sampler=train_sampler, batch_size=bsz_, collate_fn=collate, drop_last=True
 		)
 		if max_dataset_len < len(dataset):
 			max_dataset_len = len(dataset)
@@ -489,6 +506,7 @@ def train(
 	auxTaskModel.alpha_generator_algo.prep_epoch_start(global_step)
 	early_stop = False
 	for epoch in train_iterator:
+		gc.collect()
 		if early_stop:
 			break
 		weights = {k: auxTaskModel.alpha_generator_algo[k] for k in auxTaskModel.alpha_generator_algo.weights.keys()}
@@ -511,7 +529,9 @@ def train(
 				steps_trained_in_current_epoch -= 1
 				continue
 
-			process_task_batch(auxTaskModel, model, batch, tokenizer, args, largest_dataset_name, sample_prim_grad=False)
+			# there's a better way to write this but feeling lazy
+			this_loss = process_task_batch(auxTaskModel, model, batch, tokenizer, args, largest_dataset_name, sample_prim_grad=False)
+			tr_loss += this_loss / len(args.aux_task_names)
 			other_tasks = list(set(args.aux_task_names) - set([largest_dataset_name]))
 			for task_id, task_name in enumerate(other_tasks):
 				other_batch = next(aux_task_iterators[task_name], None)
@@ -520,13 +540,19 @@ def train(
 					other_batch = next(aux_task_iterators[task_name], None)
 				assert other_batch is not None, 'We should have more data for {} since we have reset the iterator'.format(task_name)
 				is_last_task = task_id == (len(other_tasks) - 1)
-				process_task_batch(auxTaskModel, model, other_batch, tokenizer, args, task_id, sample_prim_grad=is_last_task)
+				this_loss = process_task_batch(auxTaskModel, model, other_batch, tokenizer, args, task_name, sample_prim_grad=is_last_task)
+				tr_loss += this_loss / len(args.aux_task_names) 
 
 			# Todo (ldery) - run batches of the different through the model and do all the necessary gradient computation
 			if auxTaskModel.alpha_generator_algo.is_meta:
 				# Zero-out the MLM grads because we are done with them at the moment
 				for task_name in args.aux_task_names:
-					auxTaskModel.set_mlm_grads(None, aux_task_name=task_name)
+					try:
+						auxTaskModel.set_mlm_grads(None, aux_task_name=task_name)
+					except:
+						gc.collect()
+						torch.cuda.empty_cache()
+						print('Run into error here. There seems to be 2 consecutive memory erors. Skipping')
 
 			if (step + 1) % args.gradient_accumulation_steps == 0:
 				if args.fp16:
@@ -994,6 +1020,10 @@ def main():
 	else:
 		args.block_size = min(args.block_size, tokenizer.model_max_length)
 
+	if len(args.aux_task_names) > 0:
+		# we have multiple tasks. We need to have multiple lm heads
+		setattr(config, 'head_names', args.aux_task_names)
+		setattr(config, 'primary_head', args.aux_task_names[0])
 	if args.model_name_or_path:
 		model = AutoModelWithLMHead.from_pretrained(
 			args.model_name_or_path,

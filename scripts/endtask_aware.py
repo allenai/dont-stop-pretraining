@@ -136,6 +136,8 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 		# Remove the primary task name
 		aux_tasks = [x for x in task_names if x != self.primary_task_id]
 		self.aux_tasks = aux_tasks
+		for x in self.aux_tasks:
+			self.MLM_grads[x] = None
 		self.alpha_generator_algo = get_alpha_generator(options, self.primary_task_id, aux_tasks)
 		# Setup datastructures for logging
 		if self.alpha_generator_algo.is_meta:
@@ -496,9 +498,9 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 
 	def set_mlm_grads(self, grads, aux_task_name='MLM'):
 		if grads is not None:
-			assert self.MLM_grads is None, 'Need to make sure grads are none before setting'
+			assert self.MLM_grads[aux_task_name] is None, 'Need to make sure grads are none before setting'
 		else:
-			assert self.MLM_grads is not None, 'Need to make sure grads are set before setting to none'
+			assert self.MLM_grads[aux_task_name] is not None, 'Need to make sure grads are set before setting to none'
 		self.MLM_grads[aux_task_name] = grads
 
 	# Calculate the gradient for the classifier and lm
@@ -519,9 +521,9 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 			if not hasattr(self, 'body_params_end'):
 				self.body_params_end = get_body_end(this_classf)
 			
-			# Get the MLM current gradient. Double check that the MLM gradient is set correctly
-			assert self.MLM_grads is not None, 'MLM Grads should have been set by now'
 			for key, grad_list in self.MLM_grads.items():
+				# Get the MLM current gradient. Double check that the MLM gradient is set correctly
+				assert grad_list is not None, 'MLM Grads for {} should have been set by now'.format(key)
 				gradient_dict[key] = grad_list[:self.body_params_end]
 
 			# Get the gradient dictionary
