@@ -266,7 +266,6 @@ def run_batch(model, batch, tokenizer, args, task_name, try_again=False):
 		model.train()
 		outputs = model(inputs, labels=labels, head_name=task_name)
 	except RuntimeError as e:
-		pdb.set_trace()
 		gc.collect()
 		if 'out of memory' in str(e):
 			if try_again:
@@ -374,7 +373,7 @@ def train(
 	max_dataset_len, largest_dataset_name = -1, None
 	for task_name, dataset in train_dataset.items():
 		train_sampler = RandomSampler(dataset) if args.local_rank == -1 else DistributedSampler(dataset)
-		bsz_ = args.train_batch_size #args.classf_iter_batchsz if 'TAPT' in task_name else args.train_batch_size
+		bsz_ = args.train_batch_size  #args.classf_iter_batchsz if 'TAPT' in task_name else args.train_batch_size 
 		train_dataloader[task_name] = DataLoader(
 			dataset, sampler=train_sampler, batch_size=bsz_, collate_fn=collate, drop_last=True
 		)
