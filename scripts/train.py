@@ -43,7 +43,7 @@ def main():
 						nargs="+",
 						type=int,
 						required=False,
-						default=[np.random.randint(0, 1000000) for _ in range(10)],
+						default=[np.random.randint(0, 1000000) for _ in range(3)],
 						help="seed to run on. if not supplied, will choose random seed. if more than one seed supplied, will iterate.")
 	parser.add_argument('-e',
 						'--hyperparameters',

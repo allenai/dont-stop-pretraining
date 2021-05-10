@@ -1,13 +1,14 @@
 echo 'Running Baselines. DAPT and DAPT->TAPT'
 
 # Yet to run chemprot
-taskid=sciie
+taskid=chemprot
 taptfile=datasets/$taskid/train.txt
 metric='accuracy'
 
-datasz=(10)
+datasz=(1 10)
 for k in "${datasz[@]}"
 do
+	echo $k
 	datafile='datasets/'$taskid'/domain.'$k'xTAPT.txt'
 	savefldr='/home/ldery/internship/dsp/m4m_dsp/'$taskid'/small_dapt/'$k'xTapt/'
 	logfldr='static_runlogs/'$taskid'/small_dapt/'$k'xTapt'

@@ -19,3 +19,6 @@ done
 
 # echo "Running Our TAPT on Chemprot"
 # python -m scripts.train --config training_config/classifier.jsonnet  --serialization_dir  model_logs/our_chemprot_tapt --hyperparameters ROBERTA_CLASSIFIER_SMALL  --dataset chemprot --model m4m_dsp/chemprot/roberta_base_tapt_chemprot  --gpu_id 1  --perf +accuracy --evaluate_on_test  &> eval_logs/chemprot/our_tapt.txt
+
+
+python -m scripts.train --config training_config/classifier.jsonnet  --serialization_dir  model_logs/dapt_default.seed1.reinit --hyperparameters ROBERTA_CLASSIFIER_SMALL  --dataset citation_intent --model m4m_dsp/citation_intent/small_dapt/tapt_dapt.10x/default.config8.InnerConfig.0.classfbatchsz=6_1/roberta-checkpoint-best --gpu_id 0  --perf '+f1' --evaluate_on_test &> eval_logs/small_dapt/citation_intent/dapt_default.seed1.reinit.txt

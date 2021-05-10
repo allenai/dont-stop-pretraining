@@ -887,7 +887,7 @@ def main():
 	parser.add_argument('--end-val', type=float, default=1.0, help='Final task weightings')
 	parser.add_argument('--meta-lr-weight', type=float, default=0.01, help='learning rate for meta-learning')
 	parser.add_argument('--dev_batch_sz', type=int, default=128, help='Batch sz for dev-set for meta-learning')
-
+	parser.add_argument('--default_weight_config', type=int, default=None, help='Use this config for loading task weights in the default setting')
 
 	parser.add_argument("--classf_warmup_frac", type=float, default=0.06)
 	parser.add_argument("--classf_betas", type=str, default="(0.9,0.98)")
