@@ -557,6 +557,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 				output_dict = this_classf(sent_dict, labels)
 				if self.using_data_parallel:
 					output_dict['loss'] = output_dict['loss'].mean()
+# 				print('{} : {}'.format(task_id, output_dict['loss'].item() ))
 				total_loss = total_loss + self.alpha_generator_algo[task_id]*output_dict['loss']
 				total_loss = total_loss / self.grad_accum_factor
 				total_loss.backward()
@@ -574,7 +575,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 				del gradients
 
 	# We train the primary head. This is further finetuning on top pre-training
-	def train_primary(self, n_iters, optimizer, lr_scheduler, max_grad_norm, patience=3):
+	def train_primary(self, n_iters, optimizer, lr_scheduler, max_grad_norm, patience=3, metric='f1'):
 		# Setup Optimizer and stuff
 		best_iter = 0
 		if self.prim_train_dataset is None:
@@ -621,7 +622,8 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 			self.perfs['train'].append((train_metrics['f1'], train_metrics['accuracy']))
 			self.perfs['dev'].append((dev_metrics['f1'], dev_metrics['accuracy']))
 			self.perfs['test'].append((test_metrics['f1'], test_metrics['accuracy']))
-			if dev_metrics['f1'] >= self.perfs['dev'][best_iter][0]:
+			metric_idx = 0 if metric == 'f1' else 1
+			if dev_metrics[metric] >= self.perfs['dev'][best_iter][metric_idx]:
 				best_iter = iter_
 				iters_since_improvement = 0
 			else:
@@ -630,7 +632,7 @@ class ModelWithAuxTasks(AutoModelWithLMHead):
 					print('Breaking because we have no improvement in {} epochs'.format(patience))
 					break
 		best_f1, best_acc = self.perfs['test'][best_iter]
-		return best_f1, best_acc, self.perfs
+		return best_f1, best_acc, self.perfs, self.perfs['dev'][best_iter]
 
 
 	def dataset_iterator(self, dataset, shuffle=False, batchsz=-1):

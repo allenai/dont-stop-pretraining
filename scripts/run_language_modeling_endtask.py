@@ -373,7 +373,10 @@ def train(
 	max_dataset_len, largest_dataset_name = -1, None
 	for task_name, dataset in train_dataset.items():
 		train_sampler = RandomSampler(dataset) if args.local_rank == -1 else DistributedSampler(dataset)
-		bsz_ = args.train_batch_size  #args.classf_iter_batchsz if 'TAPT' in task_name else args.train_batch_size 
+		bsz_ = args.train_batch_size
+		if args.tapt_primsize:
+			bsz_ = args.classf_iter_batchsz if 'TAPT' in task_name else args.train_batch_size
+		print('This is the batchsz {} for  {} '.format(bsz_, task_name))
 		train_dataloader[task_name] = DataLoader(
 			dataset, sampler=train_sampler, batch_size=bsz_, collate_fn=collate, drop_last=True
 		)
@@ -530,6 +533,7 @@ def train(
 
 			# there's a better way to write this but feeling lazy
 			this_loss = process_task_batch(auxTaskModel, model, batch, tokenizer, args, largest_dataset_name, sample_prim_grad=False)
+# 			print('{} : {}'.format(largest_dataset_name, this_loss))
 			tr_loss += this_loss / len(args.aux_task_names)
 			other_tasks = list(set(args.aux_task_names) - set([largest_dataset_name]))
 			for task_id, task_name in enumerate(other_tasks):
@@ -540,8 +544,9 @@ def train(
 				assert other_batch is not None, 'We should have more data for {} since we have reset the iterator'.format(task_name)
 				is_last_task = task_id == (len(other_tasks) - 1)
 				this_loss = process_task_batch(auxTaskModel, model, other_batch, tokenizer, args, task_name, sample_prim_grad=is_last_task)
+# 				print('{} : {}'.format(task_name, this_loss))
 				tr_loss += this_loss / len(args.aux_task_names) 
-
+# 			print('\n')
 			# Todo (ldery) - run batches of the different through the model and do all the necessary gradient computation
 			if auxTaskModel.alpha_generator_algo.is_meta:
 				# Zero-out the MLM grads because we are done with them at the moment
@@ -911,6 +916,7 @@ def main():
 	parser.add_argument("--n-runs-classf", type=int, default=1)
 	parser.add_argument("--only-run-classifier", action='store_true', help='Only run the classifier')
 	parser.add_argument("--no-mlm-weight", action='store_true', help='Only learn the classifier - set mlm weight to 0')
+	parser.add_argument("--tapt-primsize", action='store_true', help='Make tapt batch size the size of primary task')
 	# End Change [ldery]
 
 	parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
@@ -1117,7 +1123,14 @@ def main():
 					auxTaskModel.parallelize_classifiers()
 
 				this_lr_scheduler = None
-				best_f1, best_acc, perfs  = auxTaskModel.train_primary(args.classf_ft_iters, this_optim, this_lr_scheduler, args.max_grad_norm, patience=args.classf_ft_patience)
+				best_f1, best_acc, perfs, dev_perfs  = auxTaskModel.train_primary(args.classf_ft_iters, this_optim, this_lr_scheduler, args.max_grad_norm, patience=args.classf_ft_patience, metric=args.classf_metric)
+				if args.classf_metric == 'f1':
+					best_f1 = best_f1 if dev_perfs[0] > dev_metrics['f1'] else test_metrics['f1']
+					best_acc = best_acc if dev_perfs[0] > dev_metrics['f1'] else test_metrics['accuracy']
+				else:
+					best_f1 = best_f1 if dev_perfs[1] > dev_metrics['accuracy'] else test_metrics['f1']
+					best_acc = best_acc if dev_perfs[1] > dev_metrics['accuracy'] else test_metrics['accuracy']
+
 				print('Run {}. Final Test (F1={:.3f}, Accuracy={:.3f})'.format(i, best_f1, best_acc))
 				pickle.dump(perfs, open(os.path.join(args.output_dir, 'ftmodel.{}.perf.pkl'.format(i)), 'wb') )
 				all_f1s.append(best_f1)
