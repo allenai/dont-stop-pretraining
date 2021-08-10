@@ -1,7 +1,14 @@
 import torch
 import unicodedata
 import numpy as np
+from torch.nn.utils.rnn import pad_sequence as torch_pad_sequence
 
+
+def pad_sequence(all_egs, pad_token_id):
+	if pad_token_id is None:
+		return torch_pad_sequence(all_egs, batch_first=True)
+	else:
+		return torch_pad_sequence(all_egs, batch_first=True, padding_value=pad_token_id)
 
 def mask_tokens(inputs, tokenizer, proba, tform):
 	""" Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original. """
@@ -31,10 +38,10 @@ def mask_tokens(inputs, tokenizer, proba, tform):
 		indices_random = torch.bernoulli(torch.full(labels.shape, 1.0)).bool() & masked_indices
 		random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
 		inputs[indices_random] = random_words[indices_random]
-	elif 'tform' == 'None':
-		inputs, labels, mask_indices
+	elif tform == 'None':
+		return inputs, labels, masked_indices
 	else:
-		raise ValueError('Transform not implemented Yet : {}'.format(self.tform_type))
+		raise ValueError('Transform not implemented Yet : {}'.format(tform_type))
 
 	return inputs, labels, masked_indices
 
@@ -85,9 +92,9 @@ def get_caps(s, t):
 			ti += 1
 	return caps
 
-def scale(counter, min_=0, max_=10):
+def scale(counter, min_=0, max_=10, smoothfactor=0):
 	c_min = min(counter, key=counter.get)
-	c_min = counter[c_min]
+	c_min = counter[c_min] - smoothfactor
 	c_max = max(counter, key=counter.get)
 	c_max = counter[c_max]
 	new_counter = {}
