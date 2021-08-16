@@ -18,7 +18,7 @@ def add_data_args(parser):
 	parser.add_argument('-out-domain-data', type=str, default=None)
 	parser.add_argument('-neural-lm-data', type=str, default=None)
 
-
+# Todo [ldery] - will need to incorporate caching here
 class LineByLineRawTextDataset(Dataset):
 	def __init__(self, file_path, tokenizer, tf_or_idf_present, cap_present):
 		assert os.path.isfile(file_path)
@@ -137,7 +137,6 @@ class LineByLineRawTextDataset(Dataset):
 		tfidfs = [tfidf_cntr[x] for x in sent_]
 		return self._pad_specials(tfidfs, special_token_mask)
 
-# Todo[ldery] - will need to incorporate options for target computation here
 class DataOptions(object):
 	def __init__(self, args, tokenizer, data_dict, output_dict):
 		self.construct_dataset_map(args, data_dict, output_dict, tokenizer)

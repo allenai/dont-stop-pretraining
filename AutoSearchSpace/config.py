@@ -1,6 +1,14 @@
 import numpy as np
 import itertools
-from searchspace_options import get_config_options, get_illegal_sets, get_config
+from searchspace_options import (
+	get_config_options,
+	get_illegal_sets,
+	get_config,
+	ALL_TOKEN_OUTPUTS,
+	ALL_SENT_CLASSF_OUTPUTS,
+	ALL_SENT_DOT_OUTPUTS,
+	ALL_TOKEN_CLASSF
+)
 
 def add_config_args(parser):
 	parser.add_argument('-searchspace-config', type=str, default='basic', choices=['basic', 'with-illegal', 'full'])
@@ -54,6 +62,34 @@ class Config(object):
 			if illegal.issubset(op_list):
 				return True
 		return False
+	
+	def is_tokenlevel(self, output_id):
+		assert output_id in self.config['O'], 'Invalid Output ID '
+		out_name = self.config['O'][output_id]
+		return out_name in ALL_TOKEN_OUTPUTS
+
+	def is_tokenlevel_lm(self, output_id):
+		assert output_id in self.config['O'], 'Invalid Output ID '
+		out_name = self.config['O'][output_id]
+		is_tokenlevel_lm = out_name not in ALL_TOKEN_CLASSF
+		if is_tokenlevel_lm:
+			return None, is_tokenlevel_lm
+		return [str(x) for x in range(ALL_TOKEN_CLASSF[out_name])], is_tokenlevel_lm
+
+	def is_dot_prod(self, output_id):
+		assert output_id in self.config['O'], 'Invalid Output ID '
+		out_name = self.config['O'][output_id]
+		return out_name in ALL_SENT_DOT_OUTPUTS
+
+	def is_sent_classf(self, output_id):
+		assert output_id in self.config['O'], 'Invalid Output ID '
+		out_name = self.config['O'][output_id]
+		return out_name in ALL_SENT_CLASSF_OUTPUTS.keys()
+
+	def get_vocab(self, output_id):
+		assert output_id in self.config['O'], 'Invalid Output ID '
+		out_name = self.config['O'][output_id]
+		return [str(x) for x in range(ALL_SENT_CLASSF_OUTPUTS[out_name])]
 
 def run_tests():
 	try:

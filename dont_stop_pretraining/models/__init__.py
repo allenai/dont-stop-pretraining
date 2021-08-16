@@ -1,1 +1,1 @@
-from dont_stop_pretraining.models.basic_classifier_with_f1 import BasicClassifierWithF1
+from dont_stop_pretraining.models.basic_classifier_with_f1 import BasicClassifierWithF1, BasicSequenceTagger

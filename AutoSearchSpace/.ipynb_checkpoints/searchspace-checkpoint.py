@@ -4,7 +4,8 @@ import torch.nn.functional as F
 from config import Config
 
 def add_searchspace_args(parser):
-	parser.add_argument('-weight-lr', type=float, default=1e-4)
+	parser.add_argument('-searchopt-lr', type=float, default=1e-4)
+	parser.add_argument('-num-config-samples', type=int, default=16)
 
 
 def create_tensor(shape, init=0.0, requires_grad=True, is_cuda=True):
@@ -35,11 +36,32 @@ class SearchOptions(object):
 			self.stage_order.append(stage_name)
 		self.weights['all'] = create_tensor(all_dims, requires_grad=True, is_cuda=is_cuda)
 		self.stage_order.append('all')
+		self.valid_configurations = None
 		self.create_mask_for_illegal(all_dims, is_cuda)
-
+		
+		self.prim_weight =  create_tensor((1,), requires_grad=True, is_cuda=is_cuda)
+		self.config_upstream_grad = create_tensor(all_dims, requires_grad=False, is_cuda=is_cuda)
+		self.prim_upstream_grad = create_tensor((1,), requires_grad=False, is_cuda=is_cuda)
 	
+	def get_valid_configs(self):
+		return self.valid_configurations
+	
+	def get_config_human_readable(self, config):
+		name_ = ''
+		for stage_id in range(len(config)):
+			stage_name, ids_ = self.config.get_stage_w_name(stage_id)
+			stage_ = "{}={}".format(stage_name, ids_[config[stage_id]])
+			name_ = "{}|{}".format(name_, stage_) if len(name_) else stage_
+		return name_
+	
+	def sample_configurations(self, num_samples):
+		if num_samples >= len(self.valid_configurations):
+			return self.valid_configurations
+		return np.random.choice(self.valid_configurations, size=num_samples, replace=False)
+
 	def create_mask_for_illegal(self, all_dims, is_cuda):
 		assert len(all_dims) == 4, 'This assumes that there are only 4 stages. If not, please consider re-writing this function'
+		self.valid_configurations = []
 		# This is quite inefficient but since we only do it once, I think it's ok.
 		# Will try to come up with a more polished version if it raises issues
 		# This also assumes that there are only 4 stages.
@@ -52,25 +74,44 @@ class SearchOptions(object):
 					for l in range(all_dims[3]):
 						if (self.config.is_illegal((i, j, k, l))):
 							self.weights['mask'][i, j, k, l] = neg_inf
+						else:
+							self.valid_configurations.append((i, j, k, l))
 
 	def get_weighttensor_nograd(self):
 		with torch.no_grad():
 			return self.get_weighttensor_wgrad()
 
+	# Todo [ldery] - need to test this effectively
 	def get_weighttensor_wgrad(self):
 		this_tensor = sum([self.weights[name] for name in self.stage_order])
 		shape = this_tensor.shape
+		full_ = torch.cat((this_tensor.view(-1), self.prim_weight))
 		# Compute Normalization over all entries
-		sm = F.softmax(this_tensor.view(-1), dim=-1)
-		sm = sm.view(*shape)
-		return sm
+		sm = F.softmax(full_, dim=-1)
+		sm_reshaped = sm[:-1].view(*shape)
+		return sm_reshaped, sm[-1] # Todo [ldery]
 
-	def set_weightensor_grads(self, upstream_grad_tensor):
-		weight_tensor = self.get_weighttensor_wgrad()
+	# Not the cleanest way to do this but it's ok for now
+	def update_grad(self, config, grad):
+		if isinstance(config, tuple):
+			self.config_upstream_grad[config[0], config[1], config[2], config[3]].add_(grad)
+		else:
+			self.prim_upstream_grad.add_(grad)
+	
+	def clear_grads(self):
+		self.config_upstream_grad.zero_()
+		self.prim_upstream_grad.zero_()
+
+	def set_weightensor_grads(self, upstream_grad_tensor, prim_upstream_grad):
+		weight_tensor, prim_weight = self.get_weighttensor_wgrad()
 		proxy_loss = (weight_tensor * upstream_grad_tensor).sum()
+		proxy_loss.backward(retain_graph=True)
+
+		proxy_loss = (prim_weight * prim_upstream_grad).sum()
 		proxy_loss.backward()
 
 	def update_weighttensor(self):
+		self.set_weightensor_grads(self.config_upstream_grad, self.prim_upstream_grad)
 		# Todo [ldery] - possibly implement exponentiated gradient descent if necessary
 		with torch.no_grad():
 			for _, weight in self.weights.items():
@@ -81,6 +122,23 @@ class SearchOptions(object):
 				new_weight = weight - (self.weight_lr * weight.grad)
 				weight.copy_(new_weight)
 				weight.grad.zero_()
+		self.clear_grads()
+
+	def is_tokenlevel(self, output_id):
+		return self.config.is_tokenlevel(output_id)
+	
+	def is_tokenlevel_lm(self, output_id):
+		return self.config.is_tokenlevel_lm(output_id)
+
+	def is_dot_prod(self, output_id):
+		return self.config.is_dot_prod(output_id)
+
+	def is_sent_classf(self, output_id):
+		return self.config.is_sent_classf(output_id)
+	
+	def get_vocab(self, output_id):
+		return self.config.get_vocab(output_id)
+
 
 def run_tests():
 	try:
@@ -91,10 +149,13 @@ def run_tests():
 		num_valid = (searchOps.weights['mask'] == 0).sum().item()
 		assert num_valid == 352, 'This is a hard coded number of valid configurations'
 		upstream_grad_tensor = torch.ones_like(searchOps.weights['all']) * 0.5
-		searchOps.set_weightensor_grads(upstream_grad_tensor)
+		prim_upstream_grad = torch.ones_like(searchOps.prim_weight) * 0.5
+		searchOps.set_weightensor_grads(upstream_grad_tensor, prim_upstream_grad)
 		# Doing the gradient checking.
 		have_grads = [v.grad is not None for k, v in searchOps.weights.items()][:-1]
 		assert np.all(have_grads), 'All tensors except mask must have grad enabled'
+		assert searchOps.prim_weight.grad is not None, 'Prim weight has no grad'
+		print(searchOps.get_config_human_readable((0, 1, 1, 0)))
 		msg = 'Passed.'
 	except:
 		msg = 'Failed.'

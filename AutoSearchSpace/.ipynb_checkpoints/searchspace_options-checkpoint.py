@@ -22,6 +22,21 @@ FULL['out-token-space'].extend(['TF', 'CAP'])
 FULL['out-sent-space'].extend(['QT', 'FS', 'ASP', 'SO', 'SCP', 'NSP'])
 FULL['out-space'] = [*FULL['out-token-space'], *FULL['out-sent-space']]
 
+
+ALL_TOKEN_OUTPUTS =  ['DENOISE', 'TFIDF', 'TF', 'CAP']
+ALL_TOKEN_CLASSF = {
+	'CAP': 2,
+	'TFIDF': 1,
+	'TF': 1
+}
+ALL_SENT_CLASSF_OUTPUTS = {
+	'NSP' : 2,
+	'SO'  : 2,
+	'ASP' : 3,
+	'SCP' : 2
+}
+ALL_SENT_DOT_OUTPUTS = ['QT', 'FS']
+
 def get_config(name):
 	config = None
 	if name == 'basic':

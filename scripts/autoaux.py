@@ -45,6 +45,7 @@ from transformers import (
 	WEIGHTS_NAME,
 	AdamW,
 	AutoConfig,
+	AutoModel,
 	AutoModelWithLMHead,
 	AutoTokenizer,
 	PreTrainedModel,
@@ -54,11 +55,9 @@ from transformers import (
 
 from ..AutoSearchSpace.config import add_config_args, Config
 from ..AutoSearchSpace.data import add_data_args, DataOptions
-
-try:
-	from torch.utils.tensorboard import SummaryWriter
-except ImportError:
-	from tensorboardX import SummaryWriter
+from ..AutoSearchSpace.searchspace import SearchOptions, add_searchspace_args
+from ..AutoSearchSpace.representation_mask import RepTransform
+from ..AutoSearchSpace.modelling import ModelWithAuxTasks, add_modelling_options
 
 
 logger = logging.getLogger(__name__)
@@ -68,73 +67,10 @@ MODEL_CONFIG_CLASSES = list(MODEL_WITH_LM_HEAD_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
 
-class TextDataset(Dataset):
-	def __init__(self, tokenizer: PreTrainedTokenizer, args, file_path: str, block_size=512):
-		assert os.path.isfile(file_path)
-
-		block_size = block_size - tokenizer.num_special_tokens_to_add(pair=False)
-
-		directory, filename = os.path.split(file_path)
-		cached_features_file = os.path.join(
-			directory, args.model_type + "_cached_lm_" + str(block_size) + "_" + filename
-		)
-
-		if os.path.exists(cached_features_file) and not args.overwrite_cache:
-			logger.info("Loading features from cached file %s", cached_features_file)
-			with open(cached_features_file, "rb") as handle:
-				self.examples = pickle.load(handle)
-		else:
-			logger.info("Creating features from dataset file at %s", directory)
-
-			self.examples = []
-			with open(file_path, encoding="utf-8") as f:
-				text = f.read()
-
-			tokenized_text = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(text))
-
-			for i in range(0, len(tokenized_text) - block_size + 1, block_size):  # Truncate in block of block_size
-				self.examples.append(tokenizer.build_inputs_with_special_tokens(tokenized_text[i : i + block_size]))
-			# Note that we are loosing the last truncated example here for the sake of simplicity (no padding)
-			# If your dataset is small, first you should loook for a bigger one :-) and second you
-			# can change this behavior by adding (model specific) padding.
-
-			logger.info("Saving features into cached file %s", cached_features_file)
-			with open(cached_features_file, "wb") as handle:
-				pickle.dump(self.examples, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-	def __len__(self):
-		return len(self.examples)
-
-	def __getitem__(self, item):
-		return torch.tensor(self.examples[item], dtype=torch.long)
-
-
-class LineByLineTextDataset(Dataset):
-	def __init__(self, tokenizer: PreTrainedTokenizer, args, file_path: str, block_size=512):
-		assert os.path.isfile(file_path)
-		# Here, we do not cache the features, operating under the assumption
-		# that we will soon use fast multithreaded tokenizers from the
-		# `tokenizers` repo everywhere =)
-		logger.info("Creating features from dataset file at %s", file_path)
-
-		with open(file_path, encoding="utf-8") as f:
-			lines = [line for line in f.read().splitlines() if (len(line) > 0 and not line.isspace())]
-
-		self.examples = tokenizer.batch_encode_plus(lines, add_special_tokens=True, max_length=block_size)["input_ids"]
-
-	def __len__(self):
-		return len(self.examples)
-
-	def __getitem__(self, i):
-		return torch.tensor(self.examples[i], dtype=torch.long)
-
-
-def load_and_cache_examples(args, tokenizer, evaluate=False):
-	file_path = args.eval_data_file if evaluate else args.train_data_file
-	if args.line_by_line:
-		return LineByLineTextDataset(tokenizer, args, file_path=file_path, block_size=args.block_size)
-	else:
-		return TextDataset(tokenizer, args, file_path=file_path, block_size=args.block_size)
+try:
+	from torch.utils.tensorboard import SummaryWriter
+except ImportError:
+	from tensorboardX import SummaryWriter
 
 
 def set_seed(args):
@@ -200,21 +136,30 @@ def auto_auxiliary(args):
 
 	# Create the datasets based on the configuration
 	tokenizer = get_tokenizer(args)
+
 	# Taking that the config stage 0 is the input stage
 	aux_dataOptions = DataOptions(args, tokenizer, autoloss_config.get_stage(0), autoloss_config.get_stage(-1))
+
 	# Create the data transform and iterator
-	model = DataTransformAndItr(args, aux_dataOptions, autoloss_config.get_stage(1), autoloss_config.get_stage(-1))
+	dtform_and_itr = DataTransformAndItr(args, aux_dataOptions, autoloss_config.get_stage(1), autoloss_config.get_stage(-1))
 
-	# Generate the loss functions based on the configuration
+	# Create the search options object
+	searchOpts = SearchOptions(autoloss_config, args.searchopt_lr, is_cuda=True)
 
-	# Load pretrained model and tokenizer
-	if args.local_rank not in [-1, 0]:
-		torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training download model & vocab
+	# enumerate the valid loss configs and get iterators for each loss type
+	data_iterators = {}
+	for aux_loss_config in searchOpts.get_valid_configs():
+		data_iterators[aux_loss_config] = dtform_and_itr.get_iterator(aux_loss_config)
+	
+	representation_tform = RepTransform(autoloss_config.get_stage(2))
 
+	# Todo [ldery] - need to figure out what to do in the case of distributed training
+
+	# Instantiate the model
 	if args.config_name:
-		config = AutoConfig.from_pretrained(args.config_name, cache_dir=args.cache_dir)
+		model_config = AutoConfig.from_pretrained(args.config_name, output_hidden_states=True, cache_dir=args.cache_dir)
 	elif args.model_name_or_path:
-		config = AutoConfig.from_pretrained(args.model_name_or_path, cache_dir=args.cache_dir)
+		model_config = AutoConfig.from_pretrained(args.model_name_or_path, output_hidden_states=True, cache_dir=args.cache_dir)
 	else:
 		# When we release a pip version exposing CONFIG_MAPPING,
 		# we can do `config = CONFIG_MAPPING[args.model_type]()`.
@@ -222,46 +167,269 @@ def auto_auxiliary(args):
 			"You are instantiating a new config instance from scratch. This is not supported, but you can do it from another script, save it,"
 			"and load it from here, using --config_name"
 		)
-
-
-
-
 	if args.model_name_or_path:
-		model = AutoModelWithLMHead.from_pretrained(
+		model = AutoModel.from_pretrained(
 			args.model_name_or_path,
 			from_tf=bool(".ckpt" in args.model_name_or_path),
-			config=config,
+			config=model_config,
 			cache_dir=args.cache_dir,
 		)
 	else:
 		logger.info("Training new model from scratch")
-		model = AutoModelWithLMHead.from_config(config)
+		model = AutoModel.from_config(model_config)
 
-	model.to(args.device)
+	# Instantiate the wrapper model before moving to device
+	primary_task_info = {
+			'task_id': args.prim_task_id,
+			'train_fname': args.train_data_file,
+			'dev_fname': args.dev_data_file,
+			'test_fname': args.test_data_file,
+		}
+	wrapper_model = ModelWithAuxTasks(
+										args.model_name_or_path, model, tokenizer, searchOpts, args, primary_task_info,
+										max_seq_len=args.classf_max_seq_len, dropout=args.classifier_dropout,
+										save_path=os.path.join(args.output_dir, 'modelWAuxTasks.pth'),
+										grad_accum_factor=args.gradient_accumulation_steps, batch_sz=args.classf_iter_batchsz,
+										dev_batch_sz=args.dev_batch_sz
+					)
+	wrapper_model.resize_token_embeddings(len(tokenizer))
+	wrapper_model.to(args.device)
+	model = wrapper_model.base_model
+	
+	# Setup for training the model
+	prim_dataset_len = wrapper_model.get_prim_dataset_len()  # This is the number of batches required to do 1 epoch over the primary dataset
+	if args.max_steps > 0:
+		t_total = args.max_steps
+		args.num_train_epochs = args.max_steps // (prim_dataset_len // args.gradient_accumulation_steps) + 1
+		logger.info('The number of epochs is : {}'.format(args.num_train_epochs))
+	else:
+		t_total = prim_dataset_len // args.gradient_accumulation_steps * args.num_train_epochs
 
+	no_decay = ["bias", "LayerNorm.weight"]
+	optimizer_grouped_parameters = [
+		{
+			"params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+			"weight_decay": args.weight_decay,
+		},
+		{"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
+	]
 	
+	# Setup the optimizer for the base model
+	optimizer = AdamW(
+						optimizer_grouped_parameters, betas=eval(args.classf_betas),
+						lr=args.learning_rate, eps=args.adam_epsilon, weight_decay=args.base_wd
+					)
+	scheduler = get_linear_schedule_with_warmup(
+		optimizer, num_warmup_steps=int(args.classf_warmup_frac * t_total), num_training_steps=t_total
+	)
 	
-	if args.local_rank not in [-1, 0]:
-			torch.distributed.barrier()  # Barrier to make sure only the first process in distributed training process the dataset, and the others will use the cache
-	train_dataset = load_and_cache_examples(args, tokenizer, evaluate=False)
+	# Setup an optimizer for the model heads
+	classifier_params = wrapper_model.get_classifier_params(withbase=False)
+	classifier_optim = AdamW(
+								classifier_params, betas=eval(args.classf_betas),
+								weight_decay=args.classf_wd, lr=args.classf_lr
+							)
+	classifier_scheduler = get_linear_schedule_with_warmup(
+		classifier_optim, num_warmup_steps=int(args.classf_warmup_frac * t_total), num_training_steps=t_total
+	)
 	
-	if args.local_rank == 0:
-		torch.distributed.barrier()
+	# Check if saved optimizer or scheduler states exist
+	if (
+		args.model_name_or_path
+		and os.path.isfile(os.path.join(args.model_name_or_path, "optimizer.pt"))
+		and os.path.isfile(os.path.join(args.model_name_or_path, "scheduler.pt"))
+	):
+		# Load in optimizer and scheduler states
+		optimizer.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "optimizer.pt")))
+		scheduler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, "scheduler.pt")))
 	
-	global_step, tr_loss = train(args, train_dataset, model, tokenizer)
-	logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
+	# Train!
+	logger.info("***** Running training *****")
+	logger.info("  Num Epochs = %d", args.num_train_epochs)
+	logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
+	logger.info(
+		"  Total train batch size (w. parallel, distributed & accumulation) = %d",
+		args.train_batch_size
+		* args.gradient_accumulation_steps
+		* (torch.distributed.get_world_size() if args.local_rank != -1 else 1),
+	)
+	logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
+	logger.info("  Total optimization steps = {}. Will eval every {}".format(t_total, args.eval_every))
+
+	global_step = 0
+	epochs_trained = 0
+	steps_trained_in_current_epoch = 0
 	
-	# Todo [ldery] - remove when the model is returned
-	return model
+	# Check if continuing training from a checkpoint
+	if args.model_name_or_path and os.path.exists(args.model_name_or_path):
+		try:
+			# set global_step to gobal_step of last saved checkpoint from model path
+			checkpoint_suffix = args.model_name_or_path.split("-")[-1].split("/")[0]
+			global_step = int(checkpoint_suffix)
+			epochs_trained = global_step // (prim_dataset_len // args.gradient_accumulation_steps)
+			steps_trained_in_current_epoch = global_step % (prim_dataset_len // args.gradient_accumulation_steps)
+
+			logger.info("  Continuing training from checkpoint, will skip to saved global_step")
+			logger.info("  Continuing training from epoch %d", epochs_trained)
+			logger.info("  Continuing training from global step %d", global_step)
+			logger.info("  Will skip the first %d steps in the first epoch", steps_trained_in_current_epoch)
+		except ValueError:
+			logger.info("  Starting fine-tuning.")
+	
+	set_seed(args)  # Added here for reproducibility
+	train_iterator = trange(
+		epochs_trained, int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0]
+	)
+	early_stop = False
+	classifier_dev_perfs = []
+	for epoch in train_iterator:
+		if early_stop:
+			break
+
+		epoch_iterator = tqdm(range(prim_dataset_len), desc="Iteration")
+		for iter_ in epoch_iterator:
+			# Skip past any already trained steps if resuming training
+			if steps_trained_in_current_epoch > 0:
+				steps_trained_in_current_epoch -= 1
+				continue
+
+			# Sample a subset of the valid configurations
+			sample_configs = searchOpts.sample_configurations(args.num_config_samples)
+			aggregate_data = {}
+			for config_ in sample_configs:
+				# Get the iterator
+				iterator = data_iterators[config_]
+				try:
+					# Get data from iterator
+					batch_ = next(iterator)
+				except:
+					# Need to re-set the iterator
+					data_iterators[config_] = dtform_and_itr.get_iterator(config_)
+					batch_ = next(iterator)
+				# Get the padding mask
+				pad_mask = 1.0 - (batch['input']).eq(tokenizer.pad_token_id)
+				batch_['rep_mask'] = representation_tform.get_rep_tform(batch['input'].shape, pad_mask,config_[2])
+				aggregate_data[config_] = batch_
+
+			# This does an automatic filling of the gradients. Accumulates the gradients
+			wrapper_model.get_grads_with_auxiliaries(aggregate_data, searchOpts)
+
+			if (iter_ + 1) % args.gradient_accumulation_steps == 0:
+				# We have accumulated enough gradient and can now do a step
+				torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+				# Step on the head parameters
+				classifier_optim.step()
+				classifier_scheduler.step()
+				classifier_optim.zero_grad()
+
+				# Step on the body parameters
+				optimizer.step()
+				scheduler.step()  # Update learning rate schedule
+				model.zero_grad()
+				global_step += 1
+				
+				# reset the wrapper model dev head
+				wrapper_model.reset_dev_head()
+				# Update weights and also clears the gradients
+				searchOpts.update_weighttensor()
+				torch.cuda.empty_cache()
+				
+				# ask the wrapper to track the stats + tfsummarywriter so we can see in real time
+				wrapper.push_to_tensorboard()
+
+				# This saves only the model base
+				if args.save_steps > 0 and global_step % args.save_steps == 0:
+					save_chkpt(args, str(global_step), model, tokenizer, optimizer, scheduler, rotate_chkpt=True)
+
+				if global_step % args.eval_every == 0:
+					train_metrics = wrapper_model.get_metrics(reset=True)
+					dev_metrics = wrapper_model.evaluate_classifier(set_='dev')
+					test_metrics = wrapper_model.evaluate_classifier(set_='test')
+					for k, v in train_metrics.items():
+						print_out = "[{}] | Train : {:.3f} | Dev Set : {:.3f} | Test Set : {:.3f}".format(k, v, dev_metrics[k], test_metrics[k])
+						logger.info(print_out)
+					classifier_dev_perfs.append(dev_metrics[args.classf_metric])
+					if dev_metrics[args.classf_metric] >= max(classifier_dev_perfs):
+						# We want to save the best model here
+						print('Current best dev f1 = {} achieved. Saving model'.format(dev_metrics[args.classf_metric]))
+						logger.info('Now Saving the Classifier Model')
+						wrapper_model.save()
+						logger.info('Saving Base Model')
+						save_chkpt(args, 'best', model, tokenizer, optimizer, scheduler, rotate_chkpt=False)
+
+					if len(classifier_dev_perfs) > args.classf_patience:
+						max_ = max(classifier_dev_perfs)
+						recent_max = max(classifier_dev_perfs[-args.classf_patience:])
+						if recent_max < max_:
+							print('Stopping Early at Epoch {} because No Improvement in Dev Set Accuracy'.format(epoch))
+							train_iterator.close()
+							early_stop = True
+							break
+			
+			if args.max_steps > 0 and global_step > args.max_steps:
+				epoch_iterator.close()
+				break
+	
+	# Close the tensorboard writer
+	wrapper_model.close_writer()
+	return model, wrapper_model, global_step
+
+
+
+def final_finetuning(auxTaskModel):
+	all_f1s, all_accs = [], []
+	auxTaskModel.load_primary(args.device)
+	test_metrics = auxTaskModel.evaluate_classifier(set_='test')
+	dev_metrics = auxTaskModel.evaluate_classifier(set_='dev')
+	print('Before Training. Dev  (F1={:.3f}, Accuracy={:.3f})'.format(dev_metrics['f1'], dev_metrics['accuracy']))
+	print('Before Training. Test (F1={:.3f}, Accuracy={:.3f})'.format(test_metrics['f1'], test_metrics['accuracy']))
+	no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight", "layer_norm.weight"]
+	for i in range(args.n_runs_classf):
+		torch.cuda.empty_cache()
+		args.seed = i
+		set_seed(args)
+		print('Currently working on seed : {}/{}'.format(i + 1,  args.n_runs_classf))
+		print('Loading the saved model that performed best on primary task')
+		auxTaskModel.load_primary(args.device)
+		# Setup an optimizer for the classifier
+		classifier_params = auxTaskModel.get_classifier_params(keys=[auxTaskModel.primary_task_id], withbase=True)
+		optimizer_grouped_parameters = [
+			{
+				"params": [p for n, p in classifier_params if not any(nd in n for nd in no_decay)],
+				"weight_decay": args.weight_decay,
+			},
+			{"params": [p for n, p in classifier_params if any(nd in n for nd in no_decay)], "weight_decay": 0.0},
+		]
+		this_optim = AdamW(
+									optimizer_grouped_parameters, betas=eval(args.classf_betas),
+									weight_decay=args.classf_wd, lr=args.classf_ft_lr
+								)
+
+
+		this_lr_scheduler = None
+		best_f1, best_acc, perfs, dev_perfs  = auxTaskModel.train_primary(args.classf_ft_iters, this_optim, this_lr_scheduler, args.max_grad_norm, patience=args.classf_ft_patience, metric=args.classf_metric)
+		if args.classf_metric == 'f1':
+			best_f1 = best_f1 if dev_perfs[0] > dev_metrics['f1'] else test_metrics['f1']
+			best_acc = best_acc if dev_perfs[0] > dev_metrics['f1'] else test_metrics['accuracy']
+		else:
+			best_f1 = best_f1 if dev_perfs[1] > dev_metrics['accuracy'] else test_metrics['f1']
+			best_acc = best_acc if dev_perfs[1] > dev_metrics['accuracy'] else test_metrics['accuracy']
+
+		print('Run {}. Final Test (F1={:.3f}, Accuracy={:.3f})'.format(i, best_f1, best_acc))
+		pickle.dump(perfs, open(os.path.join(args.output_dir, 'ftmodel.{}.perf.pkl'.format(i)), 'wb') )
+		all_f1s.append(best_f1)
+		all_accs.append(best_acc)
+
+	all_accs, all_f1s = np.array(all_accs), np.array(all_f1s)
+	print("Test F1 - {:3f} +/ {:.3f}".format(all_f1s.mean(), all_f1s.std()))
+	print("Test Ac - {:3f} +/ {:.3f}".format(all_accs.mean(), all_accs.std()))
+	pickle.dump([all_accs, all_f1s], open(os.path.join(args.output_dir, 'ftmodel_{}.bestperfs.pkl'.format(args.seed)), 'wb'))
 
 
 def main():
 	parser = argparse.ArgumentParser()
-
+	
 	# Required parameters
-	parser.add_argument(
-		"--train_data_file", default=None, type=str, required=True, help="The input training data file (a text file)."
-	)
 	parser.add_argument(
 		"--output_dir",
 		type=str,
@@ -278,11 +446,6 @@ def main():
 		default=None,
 		type=str,
 		help="An optional input evaluation data file to evaluate the perplexity on (a text file).",
-	)
-	parser.add_argument(
-		"--line_by_line",
-		action="store_true",
-		help="Whether distinct lines of text in the dataset are to be handled as distinct sequences.",
 	)
 	parser.add_argument(
 		"--should_continue", action="store_true", help="Whether to continue from latest checkpoint in output_dir"
@@ -398,6 +561,9 @@ def main():
 	
 	# ldery - for adding more arguments as appropriate
 	add_config_args(parser)
+	add_searchspace_args(parser)
+	add_data_args(parser)
+	add_modelling_options(parser)
 	args = parser.parse_args()
 
 	if args.model_type in ["bert", "roberta", "distilbert", "camembert"] and not args.mlm:
@@ -429,6 +595,8 @@ def main():
 				args.output_dir
 			)
 		)
+
+	os.makedirs(args.output_dir, exist_ok=True)
 
 	# Setup distant debugging if needed
 	if args.server_ip and args.server_port:
@@ -472,10 +640,14 @@ def main():
 		torch.distributed.barrier()  # End of barrier to make sure only the first process in distributed training download model & vocab
 
 	logger.info("Training/evaluation parameters %s", args)
-
+	
 	# Training
 	if args.do_train:
 		model = auto_auxiliary(args)
+	if not args.no_final_finetuning:
+		assert model is not None, 'The model has not been instantiated yet'
+		final_finetuning(model)
+	
 
 	# Saving best-practices: if you use save_pretrained for the model and tokenizer, you can reload them using from_pretrained()
 	if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
