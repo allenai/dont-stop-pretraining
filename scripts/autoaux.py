@@ -32,6 +32,7 @@ import random
 import re
 import shutil
 from typing import Dict, List, Tuple
+import pdb
 
 import numpy as np
 import torch
@@ -53,11 +54,15 @@ from transformers import (
 	get_linear_schedule_with_warmup,
 )
 
-from ..AutoSearchSpace.config import add_config_args, Config
-from ..AutoSearchSpace.data import add_data_args, DataOptions
-from ..AutoSearchSpace.searchspace import SearchOptions, add_searchspace_args
-from ..AutoSearchSpace.representation_mask import RepTransform
-from ..AutoSearchSpace.modelling import ModelWithAuxTasks, add_modelling_options
+import sys
+PATH="/home/ldery/projects/AutoAuxiliaryLoss/AutoSearchSpace/"
+sys.path.insert(1, PATH)
+
+from config import add_config_args, Config
+from data import add_data_args, DataOptions, DataTransformAndItr
+from searchspace import SearchOptions, add_searchspace_args
+from representation_mask import RepTransform
+from modelling import ModelWithAuxTasks, add_modelling_options
 
 
 logger = logging.getLogger(__name__)
@@ -116,6 +121,25 @@ def _rotate_checkpoints(args, checkpoint_prefix="checkpoint", use_mtime=False) -
 		logger.info("Deleting older checkpoint [{}] due to args.save_total_limit".format(checkpoint))
 		shutil.rmtree(checkpoint)
 
+def save_chkpt(args, id_, model, tokenizer, optimizer, scheduler, rotate_chkpt=True):
+	checkpoint_prefix = "checkpoint"
+	output_dir = os.path.join(args.output_dir, "{}-{}".format(checkpoint_prefix, id_))
+	os.makedirs(output_dir, exist_ok=True)
+	model_to_save = (
+		model.module if hasattr(model, "module") else model
+	)  # Take care of distributed/parallel training
+	model_to_save.save_pretrained(output_dir)
+	tokenizer.save_pretrained(output_dir)
+
+	torch.save(args, os.path.join(output_dir, "training_args.bin"))
+	logger.info("Saving model checkpoint to %s", output_dir)
+
+	if rotate_chkpt:
+		_rotate_checkpoints(args, checkpoint_prefix)
+
+	torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+	torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+	logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
 
 def get_tokenizer(args):
@@ -128,6 +152,11 @@ def get_tokenizer(args):
 			"You are instantiating a new tokenizer from scratch. This is not supported, but you can do it from another script, save it,"
 			"and load it from here, using --tokenizer_name"
 		)
+	if args.block_size <= 0:
+		args.block_size = tokenizer.model_max_length
+		# Our input block size will be the max possible for the model
+	else:
+		args.block_size = min(args.block_size, tokenizer.model_max_length)
 	return tokenizer
 
 def auto_auxiliary(args):
@@ -180,21 +209,20 @@ def auto_auxiliary(args):
 
 	# Instantiate the wrapper model before moving to device
 	primary_task_info = {
-			'task_id': args.prim_task_id,
+			'prim_task_id': args.prim_task_id,
 			'train_fname': args.train_data_file,
 			'dev_fname': args.dev_data_file,
 			'test_fname': args.test_data_file,
 		}
+	model.resize_token_embeddings(len(tokenizer))
 	wrapper_model = ModelWithAuxTasks(
-										args.model_name_or_path, model, tokenizer, searchOpts, args, primary_task_info,
+										args.model_name_or_path, model, searchOpts, args, primary_task_info,
 										max_seq_len=args.classf_max_seq_len, dropout=args.classifier_dropout,
 										save_path=os.path.join(args.output_dir, 'modelWAuxTasks.pth'),
 										grad_accum_factor=args.gradient_accumulation_steps, batch_sz=args.classf_iter_batchsz,
 										dev_batch_sz=args.dev_batch_sz
 					)
-	wrapper_model.resize_token_embeddings(len(tokenizer))
 	wrapper_model.to(args.device)
-	model = wrapper_model.base_model
 	
 	# Setup for training the model
 	prim_dataset_len = wrapper_model.get_prim_dataset_len()  # This is the number of batches required to do 1 epoch over the primary dataset
@@ -249,7 +277,7 @@ def auto_auxiliary(args):
 	logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
 	logger.info(
 		"  Total train batch size (w. parallel, distributed & accumulation) = %d",
-		args.train_batch_size
+		args.per_gpu_train_batch_size
 		* args.gradient_accumulation_steps
 		* (torch.distributed.get_world_size() if args.local_rank != -1 else 1),
 	)
@@ -305,28 +333,29 @@ def auto_auxiliary(args):
 				except:
 					# Need to re-set the iterator
 					data_iterators[config_] = dtform_and_itr.get_iterator(config_)
-					batch_ = next(iterator)
+					batch_ = next(data_iterators[config_])
 				# Get the padding mask
-				pad_mask = 1.0 - (batch['input']).eq(tokenizer.pad_token_id)
-				batch_['rep_mask'] = representation_tform.get_rep_tform(batch['input'].shape, pad_mask,config_[2])
+				pad_mask = 1.0 - ((batch_['input']).eq(tokenizer.pad_token_id)).float()
+				batch_['rep_mask'] = representation_tform.get_rep_tform(batch_['input'].shape, pad_mask,config_[2])
 				aggregate_data[config_] = batch_
 
 			# This does an automatic filling of the gradients. Accumulates the gradients
 			wrapper_model.get_grads_with_auxiliaries(aggregate_data, searchOpts)
-
 			if (iter_ + 1) % args.gradient_accumulation_steps == 0:
 				# We have accumulated enough gradient and can now do a step
 				torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-				# Step on the head parameters
-				classifier_optim.step()
-				classifier_scheduler.step()
-				classifier_optim.zero_grad()
-
 				# Step on the body parameters
 				optimizer.step()
 				scheduler.step()  # Update learning rate schedule
 				model.zero_grad()
 				global_step += 1
+
+
+				# Step on the head parameters
+				torch.nn.utils.clip_grad_norm_(classifier_params, args.max_grad_norm)
+				classifier_optim.step()
+				classifier_scheduler.step()
+				classifier_optim.zero_grad()
 				
 				# reset the wrapper model dev head
 				wrapper_model.reset_dev_head()
@@ -335,7 +364,7 @@ def auto_auxiliary(args):
 				torch.cuda.empty_cache()
 				
 				# ask the wrapper to track the stats + tfsummarywriter so we can see in real time
-				wrapper.push_to_tensorboard()
+				wrapper_model.push_to_tensorboard(global_step)
 
 				# This saves only the model base
 				if args.save_steps > 0 and global_step % args.save_steps == 0:
@@ -372,11 +401,11 @@ def auto_auxiliary(args):
 	
 	# Close the tensorboard writer
 	wrapper_model.close_writer()
-	return model, wrapper_model, global_step
+	return model, wrapper_model, tokenizer, global_step
 
 
 
-def final_finetuning(auxTaskModel):
+def final_finetuning(auxTaskModel, args):
 	all_f1s, all_accs = [], []
 	auxTaskModel.load_primary(args.device)
 	test_metrics = auxTaskModel.evaluate_classifier(set_='test')
@@ -442,12 +471,6 @@ def main():
 
 	# Other parameters
 	parser.add_argument(
-		"--eval_data_file",
-		default=None,
-		type=str,
-		help="An optional input evaluation data file to evaluate the perplexity on (a text file).",
-	)
-	parser.add_argument(
 		"--should_continue", action="store_true", help="Whether to continue from latest checkpoint in output_dir"
 	)
 	parser.add_argument(
@@ -457,9 +480,6 @@ def main():
 		help="The model checkpoint for weights initialization. Leave None if you want to train a model from scratch.",
 	)
 
-	parser.add_argument(
-		"--mlm", action="store_true", help="Train with masked-language modeling loss instead of language modeling."
-	)
 	parser.add_argument(
 		"--mlm_probability", type=float, default=0.15, help="Ratio of tokens to mask for masked language modeling loss"
 	)
@@ -491,21 +511,16 @@ def main():
 		"Default to the model max input length for single sentence inputs (take into account special tokens).",
 	)
 	parser.add_argument("--do_train", action="store_true", help="Whether to run training.")
-	parser.add_argument("--do_eval", action="store_true", help="Whether to run eval on the dev set.")
-	parser.add_argument(
-		"--evaluate_during_training", action="store_true", help="Run evaluation during training at each logging step."
-	)
 
 	parser.add_argument("--per_gpu_train_batch_size", default=4, type=int, help="Batch size per GPU/CPU for training.")
-	parser.add_argument(
-		"--per_gpu_eval_batch_size", default=4, type=int, help="Batch size per GPU/CPU for evaluation."
-	)
+
 	parser.add_argument(
 		"--gradient_accumulation_steps",
 		type=int,
 		default=1,
 		help="Number of updates steps to accumulate before performing a backward/update pass.",
 	)
+	parser.add_argument("--base_wd", type=float, default=0.01)
 	parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
 	parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight decay if we apply some.")
 	parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
@@ -529,11 +544,7 @@ def main():
 		default=None,
 		help="Limit the total amount of checkpoints, delete the older checkpoints in the output_dir, does not delete by default",
 	)
-	parser.add_argument(
-		"--eval_all_checkpoints",
-		action="store_true",
-		help="Evaluate all checkpoints starting with the same prefix as model_name_or_path ending and ending with step number",
-	)
+
 	parser.add_argument("--no_cuda", action="store_true", help="Avoid using CUDA when available")
 	parser.add_argument(
 		"--overwrite_output_dir", action="store_true", help="Overwrite the content of the output directory"
@@ -566,15 +577,10 @@ def main():
 	add_modelling_options(parser)
 	args = parser.parse_args()
 
-	if args.model_type in ["bert", "roberta", "distilbert", "camembert"] and not args.mlm:
+	if args.model_type in ["bert", "roberta", "distilbert", "camembert"]:
 		raise ValueError(
 			"BERT and RoBERTa-like models do not have LM heads but masked LM heads. They must be run using the --mlm "
 			"flag (masked language modeling)."
-		)
-	if args.eval_data_file is None and args.do_eval:
-		raise ValueError(
-			"Cannot do evaluation without an evaluation data file. Either supply a file to --eval_data_file "
-			"or remove the --do_eval argument."
 		)
 	if args.should_continue:
 		sorted_checkpoints = _sorted_checkpoints(args)
@@ -643,10 +649,10 @@ def main():
 	
 	# Training
 	if args.do_train:
-		model = auto_auxiliary(args)
+		base_model, model, tokenizer, global_step = auto_auxiliary(args)
 	if not args.no_final_finetuning:
 		assert model is not None, 'The model has not been instantiated yet'
-		final_finetuning(model)
+		final_finetuning(model, args)
 	
 
 	# Saving best-practices: if you use save_pretrained for the model and tokenizer, you can reload them using from_pretrained()
@@ -659,19 +665,14 @@ def main():
 		# Save a trained model, configuration and tokenizer using `save_pretrained()`.
 		# They can then be reloaded using `from_pretrained()`
 		model_to_save = (
-			model.module if hasattr(model, "module") else model
+			model.module if hasattr(base_model, "module") else base_model
 		)  # Take care of distributed/parallel training
-		model_to_save.save_pretrained(args.output_dir)
+		base_model.save_pretrained(args.output_dir)
 		tokenizer.save_pretrained(args.output_dir)
 
 		# Good practice: save your training arguments together with the trained model
 		torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
 
-		# Todo [ldery] - modify this to fix it
-		# Load a trained model and vocabulary that you have fine-tuned
-		model = AutoModelWithLMHead.from_pretrained(args.output_dir)
-		tokenizer = AutoTokenizer.from_pretrained(args.output_dir)
-		model.to(args.device)
 
 if __name__ == "__main__":
 	main()

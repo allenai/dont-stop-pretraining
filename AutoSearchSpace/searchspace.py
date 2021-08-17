@@ -57,7 +57,8 @@ class SearchOptions(object):
 	def sample_configurations(self, num_samples):
 		if num_samples >= len(self.valid_configurations):
 			return self.valid_configurations
-		return np.random.choice(self.valid_configurations, size=num_samples, replace=False)
+		idxs = np.random.choice(len(self.valid_configurations), size=num_samples, replace=False)
+		return [self.valid_configurations[idx_] for idx_ in idxs]
 
 	def create_mask_for_illegal(self, all_dims, is_cuda):
 		assert len(all_dims) == 4, 'This assumes that there are only 4 stages. If not, please consider re-writing this function'
@@ -77,19 +78,23 @@ class SearchOptions(object):
 						else:
 							self.valid_configurations.append((i, j, k, l))
 
+
 	def get_weighttensor_nograd(self):
 		with torch.no_grad():
 			return self.get_weighttensor_wgrad()
 
 	# Todo [ldery] - need to test this effectively
-	def get_weighttensor_wgrad(self):
+	def get_weighttensor_wgrad(self, softmax=True):
 		this_tensor = sum([self.weights[name] for name in self.stage_order])
 		shape = this_tensor.shape
-		full_ = torch.cat((this_tensor.view(-1), self.prim_weight))
-		# Compute Normalization over all entries
-		sm = F.softmax(full_, dim=-1)
-		sm_reshaped = sm[:-1].view(*shape)
-		return sm_reshaped, sm[-1] # Todo [ldery]
+		if softmax:
+			full_ = torch.cat((this_tensor.view(-1), self.prim_weight))
+			# Compute Normalization over all entries
+			sm = F.softmax(full_, dim=-1)
+			sm_reshaped = sm[:-1].view(*shape)
+			return sm_reshaped, sm[-1]
+		else:
+			return this_tensor, self.prim_weight
 
 	# Not the cleanest way to do this but it's ok for now
 	def update_grad(self, config, grad):
@@ -103,9 +108,9 @@ class SearchOptions(object):
 		self.prim_upstream_grad.zero_()
 
 	def set_weightensor_grads(self, upstream_grad_tensor, prim_upstream_grad):
-		weight_tensor, prim_weight = self.get_weighttensor_wgrad()
+		weight_tensor, prim_weight = self.get_weighttensor_wgrad(softmax=False)
 		proxy_loss = (weight_tensor * upstream_grad_tensor).sum()
-		proxy_loss.backward(retain_graph=True)
+		proxy_loss.backward()
 
 		proxy_loss = (prim_weight * prim_upstream_grad).sum()
 		proxy_loss.backward()
@@ -122,6 +127,11 @@ class SearchOptions(object):
 				new_weight = weight - (self.weight_lr * weight.grad)
 				weight.copy_(new_weight)
 				weight.grad.zero_()
+			# Perform updates on the primary weight
+			assert self.prim_weight.grad is not None, 'Prim Weight should have gradients'
+			new_prim = self.prim_weight - (self.weight_lr * self.prim_weight.grad)
+			self.prim_weight.copy_(new_prim)
+			self.prim_weight.grad.zero_()
 		self.clear_grads()
 
 	def is_tokenlevel(self, output_id):

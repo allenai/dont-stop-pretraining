@@ -83,6 +83,8 @@ class LineByLineRawTextDataset(Dataset):
 			capitalizations = [] if cap_present else None
 			for line in f.readlines():
 				line = line.strip()
+				if len(line) < 2: # Remove all single letter or empty lines
+					continue
 				lines.append(line)
 				tokens = tokenizer.tokenize(line)
 				if cap_present:
@@ -107,10 +109,11 @@ class LineByLineRawTextDataset(Dataset):
 		return self.doc_names[idx]
 
 	def _pad_specials(self, sent_, special_tok_mask):
-		if len(sent_) == len(special_tok_mask):
-			assert sum(special_tok_mask) > 0, 'Sentence and token mask same length but there are special tokens'
-			return torch.tensor(sent_)
-		assert len(sent_) < len(special_tok_mask), 'Sentence must have fewer tokens than the special tokens mask'
+# 		if len(sent_) == len(special_tok_mask):
+# 			assert sum(special_tok_mask) > 0, 'Sentence and token mask same length but there are special tokens'
+# 			return torch.tensor(sent_)
+# 		if len(sent_) >= len(special_tok_mask):
+# 		assert len(sent_) < len(special_tok_mask), 'Sentence must have fewer tokens than the special tokens mask'
 		mul_ = 1.0 if isinstance(sent_[0], float) else 1
 		new_sent_ = torch.full((len(special_tok_mask), ), OUT_PAD * mul_) # We only compute loss on masked tokens
 		j = 0
@@ -119,7 +122,11 @@ class LineByLineRawTextDataset(Dataset):
 				continue
 			new_sent_[idx_] = sent_[j]
 			j += 1
-		assert j == len(sent_), 'New sentence not correctly filled to completion'
+# 		j_idx = j
+# 		if j != len(sent_):
+# 			import pdb
+# 			pdb.set_trace()
+# 		assert j == len(sent_), 'New sentence not correctly filled to completion'
 		return new_sent_
 
 	def getcaps(self, sent_idx, special_token_mask):
@@ -167,7 +174,7 @@ class DataOptions(object):
 	def get_dataset(self, id_):
 		return self.id_to_dataset_dict[id_]
 
-import pdb
+
 class DataTransformAndItr(object):
 	def __init__(self, args, dataoptions, input_tform_dict, output_dict):
 		# Sets the total batch size
@@ -252,7 +259,7 @@ class DataTransformAndItr(object):
 		dataloader = DataLoader(
 			ds, sampler=sampler, batch_size=self.train_batch_size, collate_fn=collate
 		)
-		return dataloader
+		return iter(dataloader)
 
 
 # Todo  [ldery] - run some tests to make sure code here is working

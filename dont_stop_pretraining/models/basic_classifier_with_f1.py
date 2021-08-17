@@ -9,7 +9,7 @@ from allennlp.modules import Seq2SeqEncoder, Seq2VecEncoder, TextFieldEmbedder, 
 from allennlp.nn import InitializerApplicator, RegularizerApplicator
 from allennlp.nn.util import get_text_field_mask
 from allennlp.training.metrics import CategoricalAccuracy, F1Measure, MeanAbsoluteError
-
+import pdb
 
 @Model.register("basic_classifier_with_f1")
 class BasicClassifierWithF1(Model):
@@ -81,7 +81,6 @@ class BasicClassifierWithF1(Model):
 			self._dropout = None
 
 		self._label_namespace = label_namespace
-
 		if num_labels:
 			self._num_labels = num_labels
 		else:
@@ -99,9 +98,7 @@ class BasicClassifierWithF1(Model):
 		if initializer is not None:
 			initializer(self)
 
-	def forward(  # type: ignore
-				self, tokens, label=None, attn_mask=None
-		) -> Dict[str, torch.Tensor]:
+	def forward(self, tokens, label=None, attn_mask=None) -> Dict[str, torch.Tensor]:
 
 		"""
 		Parameters
@@ -126,11 +123,12 @@ class BasicClassifierWithF1(Model):
 		"""
 
 		embedded_text = self._text_field_embedder(tokens, attention_mask=attn_mask)
+
 		if isinstance(tokens, dict):
 			mask = get_text_field_mask(tokens).float()
 		else:
 			mask = None
-			embedded_text = embedded_text[1][-1]
+			embedded_text = embedded_text['last_hidden_state']
 
 		if self._seq2seq_encoder:
 			embedded_text = self._seq2seq_encoder(embedded_text, mask=mask)
@@ -215,7 +213,7 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 		self._classification_layer = torch.nn.Linear(self._classifier_input_dim, self._num_labels)
 		if self._num_labels == 1: # We are performing regression
 			self._mae = MeanAbsoluteError()
-			self._loss = torch.nn.MSELoss(reduction='none')
+			self._loss = torch.nn.L1Loss(reduction='none')
 		self.is_classification_task = self._num_labels > 1
 		if initializer is not None:
 			initializer(self)
@@ -229,7 +227,7 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 			mask = get_text_field_mask(tokens).float()
 		else:
 			mask = None
-			embedded_text = embedded_text[1][-1]
+			embedded_text = embedded_text['last_hidden_state']
 
 		if self._dropout:
 			embedded_text = self._dropout(embedded_text)
@@ -242,18 +240,28 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 		if self.is_classification_task:
 			probs = torch.nn.functional.softmax(logits, dim=-1)
 			output_dict = {"logits": logits, "probs": probs}
+			labels = labels.long()
 
 		if label is not None:
-			loss = self._loss(logits, label.long().view(-1))
+			# TODO[LDERY] need to check if we consider the padding appropriately here
+			logits, label = logits.view(-1), label.view(-1)
+			if not self.is_classification_task:
+				label_mask = 1.0 - (label < 0).float()
+				label = label * label_mask
+				logits = logits * label_mask
+			loss = self._loss(logits, label)
 			output_dict["loss_full"] = loss
-			output_dict["loss"] = loss.mean()
-			if is_classification_task:
+			if not self.is_classification_task:
+				output_dict["loss"] = loss.sum() / (label_mask.float().sum())
+			else:
+				output_dict["loss"] = loss.mean()
+			if self.is_classification_task:
 				for i in range(self._num_labels):
 					metric = self._label_f1_metrics[self.vocab.get_token_from_index(index=i, namespace="labels")]
 					metric(probs, label)
 				self._accuracy(logits, label)
 			else: # We are performing a regression task
-				self._mae(logits, label)
+				self._mae(logits.view(-1), label.view(-1))
 		return output_dict
 	
 	def get_metrics(self, reset: bool = False) -> Dict[str, float]:

@@ -1,4 +1,15 @@
 from copy import deepcopy
+
+VBASIC = {
+	'input-space' : ['Task'],
+	'input-tform-space': ['None', 'Replace', 'Mask'],
+	'rep-tform-space' : ['None'],
+	'out-token-space' : ['DENOISE'],
+	'out-sent-space': [],
+}
+VBASIC['out-space'] = [*VBASIC['out-token-space'], *VBASIC['out-sent-space']]
+
+
 BASIC = {
 	'input-space' : ['Task', 'In-Domain'],
 	'input-tform-space': ['None', 'Replace', 'Mask'],
@@ -45,6 +56,8 @@ def get_config(name):
 		config = W_ILLEGAL
 	elif name == 'full':
 		config = FULL
+	elif name == 'vbasic':
+		config = VBASIC
 	assert config is not None, 'Wrong Config name given : {}'.format(name)
 	return config
 

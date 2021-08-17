@@ -10,7 +10,7 @@ class RepTransform(object):
 		'''
 			padding_mask should have 1 in indices that are not padding
 		'''
-		assert rep_tform_idx in  rep_dict, 'Invalid Representation Transform Index Specified {}'.format(rep_tform_idx)
+		assert rep_tform_idx in  self.rep_dict, 'Invalid Representation Transform Index Specified {}'.format(rep_tform_idx)
 		rep_name = self.rep_dict[rep_tform_idx]
 		if rep_name == 'None':
 			return None
