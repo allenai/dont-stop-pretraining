@@ -554,7 +554,6 @@ class ModelWithAuxTasks(AutoModel):
 			is_prim = not isinstance(aux_loss_config, tuple)
 			human_readable = searchOpts.get_config_human_readable(aux_loss_config) if not is_prim else aux_loss_config
 			if not is_prim:
-				continue
 				task_id = ".".join([str(x) for x in aux_loss_config])
 			else:
 				task_id = aux_loss_config
