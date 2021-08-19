@@ -123,12 +123,11 @@ class BasicClassifierWithF1(Model):
 		"""
 
 		embedded_text = self._text_field_embedder(tokens, attention_mask=attn_mask)
-
 		if isinstance(tokens, dict):
 			mask = get_text_field_mask(tokens).float()
 		else:
 			mask = None
-			embedded_text = embedded_text['last_hidden_state']
+			embedded_text = embedded_text[1][-1]
 
 		if self._seq2seq_encoder:
 			embedded_text = self._seq2seq_encoder(embedded_text, mask=mask)
@@ -227,7 +226,7 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 			mask = get_text_field_mask(tokens).float()
 		else:
 			mask = None
-			embedded_text = embedded_text['last_hidden_state']
+			embedded_text = embedded_text[1][-1]
 
 		if self._dropout:
 			embedded_text = self._dropout(embedded_text)
