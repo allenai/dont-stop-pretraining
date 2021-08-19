@@ -117,7 +117,7 @@ class ModelWithLMHead(nn.Module):
 			mask = get_text_field_mask(tokens).float()
 		else:
 			mask = None
-			embedded_text = embedded_text['last_hidden_state']
+			embedded_text = embedded_text[1][-1]
 		logits = self.lm_head(embedded_text)
 		loss = self._loss(logits.view(-1, logits.shape[-1]), labels.long().view(-1))
 		output_dict = {}
@@ -218,6 +218,8 @@ class ModelWithAuxTasks(AutoModel):
 				vocab = label_vocab
 			else:
 				vocab = Vocabulary.from_instances(all_instances)
+				label_vocab = vocab
+
 			all_labels = []
 			for instance in all_instances:
 				label = instance.fields['label']
@@ -239,6 +241,7 @@ class ModelWithAuxTasks(AutoModel):
 		vocab = self.datasets['train']['vocab']
 		self.setup_classifier(dropout, self.primary_task_info['prim_task_id'], vocab, embedding_dim, ff_multiplier, num_layers=num_layers)
 		# Setup the other outputs here
+		return
 		for aux_loss_config in searchOpts.get_valid_configs():
 			key_ = ".".join([str(x) for x in aux_loss_config])
 			if searchOpts.is_tokenlevel(aux_loss_config[-1]):
@@ -372,7 +375,7 @@ class ModelWithAuxTasks(AutoModel):
 		torch.cuda.empty_cache()
 		# reset the metrics before running new stuff
 		try:
-			_ = self.get_metrics(prim_head=prim_head, reset=True)
+			_ = self.get_metrics(head_=prim_head, reset=True)
 		except:
 			print('This classifier does not need to reset metrics.')
 		prim_head.eval()
@@ -461,10 +464,10 @@ class ModelWithAuxTasks(AutoModel):
 		assert dev_optim is not None, 'The optimizer for the dev head has not been instantiated'
 
 		# perform gradient descent to get the dev-head
-		samples = self.get_classifier_samples(self.datasets['dev'], self.dev_batch_sz)
+		# Todo [ldery] - restore this to 'dev' if it turns out this is not the issue
+		samples = self.get_classifier_samples(self.datasets['train'], self.dev_batch_sz)
 		prev_loss_, tol = 1e10, 1e-3
 		all_metrics = [[], [], []]
-		
 		for i in range(self.options.classf_ft_iters):
 			output = this_head(*samples)
 			loss_ = output['loss']
@@ -485,7 +488,8 @@ class ModelWithAuxTasks(AutoModel):
 				break
 			prev_loss_ = loss_.item()
 			del grads
-		torch.cuda.empty_cache()
+			del loss_
+			torch.cuda.empty_cache()
 
 		# Save performance for analysis
 		self.dev_head_perfs['f1'].append(np.mean(all_metrics[0]))
@@ -502,10 +506,14 @@ class ModelWithAuxTasks(AutoModel):
 			self.tboard_writer.add_scalar('dev.head.perfs.{}'.format(k), v[-1], step_)
 
 		aux_cosines, losses_, weights_, prods_  = {}, {}, {}, {}
+		norms_ = {}
 		for k, v in self.weight_stats.items():
 			values = [x[-1] for x in v[-self.grad_accum_factor:]]
 			aux_cosines[k] = np.mean(values)
-			
+
+			values = [x[1] for x in v[-self.grad_accum_factor:]]
+			norms_[k] = np.mean(values)
+
 			v_l = self.config_losses_and_weights[k]
 			values = [x[0] for x in v_l[-self.grad_accum_factor:]]
 			losses_[k] = np.mean(values)
@@ -518,6 +526,7 @@ class ModelWithAuxTasks(AutoModel):
 		self.tboard_writer.add_scalars('aux.losses', losses_, step_)
 		self.tboard_writer.add_scalars('aux.weights', weights_, step_)
 		self.tboard_writer.add_scalars('aux.lossxweights', prods_, step_)
+		self.tboard_writer.add_scalars('aux.gradnorms', norms_, step_)
 
 
 	# At the end of this, all the model gradients should be populated appropriately 
@@ -532,15 +541,20 @@ class ModelWithAuxTasks(AutoModel):
 		dev_norm = calc_norm(dev_head_grads)
 		auxloss_cosines = {}
 
+		key_order = [self.primary_task_info['prim_task_id']]
+		key_order.extend(aux_config_w_batch.keys())
 		sent_dict, labels = self.get_classifier_samples(self.datasets['train'], self.batch_sz)
 		prim_batch = {'input':sent_dict , 'output':labels, 'rep_mask': None}
 		aux_config_w_batch.update({self.primary_task_info['prim_task_id']: prim_batch})
-		
 		aux_weights, prim_weight = searchOpts.get_weighttensor_nograd()
-		for aux_loss_config, batch in aux_config_w_batch.items():
+		
+		prim_norm = None
+		for aux_loss_config in key_order:
+			batch = aux_config_w_batch[aux_loss_config]
 			is_prim = not isinstance(aux_loss_config, tuple)
 			human_readable = searchOpts.get_config_human_readable(aux_loss_config) if not is_prim else aux_loss_config
 			if not is_prim:
+				continue
 				task_id = ".".join([str(x) for x in aux_loss_config])
 			else:
 				task_id = aux_loss_config
@@ -567,8 +581,11 @@ class ModelWithAuxTasks(AutoModel):
 				this_weight = aux_weights[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
 			else:
 				this_weight = prim_weight.item()
-			# Todo [ldery] - made this change to the task norms
-			weighted_loss = (loss_ * this_weight) /  self.grad_accum_factor
+			if prim_norm is None:
+				assert is_prim, 'The primary task should be the first to be run'
+				prim_norm = task_norm
+			norm_weighting = prim_norm / task_norm
+			weighted_loss = (loss_ * this_weight * norm_weighting) / self.grad_accum_factor
 			weighted_loss.backward()
 			self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight))
 
