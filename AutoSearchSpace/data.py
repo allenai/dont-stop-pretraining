@@ -173,6 +173,9 @@ class DataOptions(object):
 
 	def get_dataset(self, id_):
 		return self.id_to_dataset_dict[id_]
+	
+	def get_dataset_len(self, id_):
+		return len(self.id_to_dataset_dict[id_])
 
 
 class DataTransformAndItr(object):
@@ -184,7 +187,7 @@ class DataTransformAndItr(object):
 		self.output_dict = output_dict
 		self.proba = args.mlm_probability
 		self.block_size = args.block_size
-	
+
 	def apply_in_tform(self, sent, in_tform_type):
 		return mask_tokens(sent, self.dataOpts.tokenizer, self.proba, in_tform_type)
 
