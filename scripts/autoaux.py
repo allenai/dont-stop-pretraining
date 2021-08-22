@@ -177,8 +177,12 @@ def auto_auxiliary(args):
 
 	# enumerate the valid loss configs and get iterators for each loss type
 	data_iterators = {}
+	max_dataset_len = -1
 	for aux_loss_config in searchOpts.get_valid_configs():
 		data_iterators[aux_loss_config] = dtform_and_itr.get_iterator(aux_loss_config)
+		dataset_len = len(data_iterators[aux_loss_config])
+		max_dataset_len = max(max_dataset_len, dataset_len)
+
 	
 	representation_tform = RepTransform(autoloss_config.get_stage(2))
 
@@ -197,7 +201,7 @@ def auto_auxiliary(args):
 			"and load it from here, using --config_name"
 		)
 	if args.model_name_or_path:
-		model = AutoModel.from_pretrained(
+		model = AutoModelWithLMHead.from_pretrained(
 			args.model_name_or_path,
 			from_tf=bool(".ckpt" in args.model_name_or_path),
 			config=model_config,
@@ -205,7 +209,7 @@ def auto_auxiliary(args):
 		)
 	else:
 		logger.info("Training new model from scratch")
-		model = AutoModel.from_config(model_config)
+		model = AutoModelWithLMHead.from_config(model_config)
 
 	# Instantiate the wrapper model before moving to device
 	primary_task_info = {
@@ -215,6 +219,7 @@ def auto_auxiliary(args):
 			'test_fname': args.test_data_file,
 		}
 	model.resize_token_embeddings(len(tokenizer))
+	
 	wrapper_model = ModelWithAuxTasks(
 										args.model_name_or_path, model, searchOpts, args, primary_task_info,
 										max_seq_len=args.classf_max_seq_len, dropout=args.classifier_dropout,
@@ -222,16 +227,16 @@ def auto_auxiliary(args):
 										grad_accum_factor=args.gradient_accumulation_steps, batch_sz=args.classf_iter_batchsz,
 										dev_batch_sz=args.dev_batch_sz
 					)
+	model.to(args.device)
 	wrapper_model.to(args.device)
-	
+
 	# Setup for training the model
-	prim_dataset_len = wrapper_model.get_prim_dataset_len()  # This is the number of batches required to do 1 epoch over the primary dataset
 	if args.max_steps > 0:
 		t_total = args.max_steps
-		args.num_train_epochs = args.max_steps // (prim_dataset_len // args.gradient_accumulation_steps) + 1
+		args.num_train_epochs = args.max_steps // (max_dataset_len // args.gradient_accumulation_steps) + 1
 		logger.info('The number of epochs is : {}'.format(args.num_train_epochs))
 	else:
-		t_total = prim_dataset_len // args.gradient_accumulation_steps * args.num_train_epochs
+		t_total = max_dataset_len // args.gradient_accumulation_steps * args.num_train_epochs
 
 	no_decay = ["bias", "LayerNorm.weight"]
 	optimizer_grouped_parameters = [
@@ -294,8 +299,8 @@ def auto_auxiliary(args):
 			# set global_step to gobal_step of last saved checkpoint from model path
 			checkpoint_suffix = args.model_name_or_path.split("-")[-1].split("/")[0]
 			global_step = int(checkpoint_suffix)
-			epochs_trained = global_step // (prim_dataset_len // args.gradient_accumulation_steps)
-			steps_trained_in_current_epoch = global_step % (prim_dataset_len // args.gradient_accumulation_steps)
+			epochs_trained = global_step // (max_dataset_len // args.gradient_accumulation_steps)
+			steps_trained_in_current_epoch = global_step % (max_dataset_len // args.gradient_accumulation_steps)
 
 			logger.info("  Continuing training from checkpoint, will skip to saved global_step")
 			logger.info("  Continuing training from epoch %d", epochs_trained)
@@ -314,7 +319,7 @@ def auto_auxiliary(args):
 		if early_stop:
 			break
 
-		epoch_iterator = tqdm(range(prim_dataset_len), desc="Iteration")
+		epoch_iterator = tqdm(range(max_dataset_len), desc="Iteration")
 		for iter_ in epoch_iterator:
 			# Skip past any already trained steps if resuming training
 			if steps_trained_in_current_epoch > 0:
@@ -344,19 +349,19 @@ def auto_auxiliary(args):
 			if (iter_ + 1) % args.gradient_accumulation_steps == 0:
 				# We have accumulated enough gradient and can now do a step
 				torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+				torch.nn.utils.clip_grad_norm_(wrapper_model.get_classifier_params(), args.max_grad_norm)
+				
+				# Step on the head parameters
+				classifier_optim.step()
+				classifier_scheduler.step()
+				classifier_optim.zero_grad()
+				
 				# Step on the body parameters
 				optimizer.step()
 				scheduler.step()  # Update learning rate schedule
 				model.zero_grad()
 				global_step += 1
 
-
-				# Step on the head parameters
-				torch.nn.utils.clip_grad_norm_(classifier_params, args.max_grad_norm)
-				classifier_optim.step()
-				classifier_scheduler.step()
-				classifier_optim.zero_grad()
-				
 				# reset the wrapper model dev head
 				wrapper_model.reset_dev_head()
 				# Update weights and also clears the gradients
@@ -374,10 +379,26 @@ def auto_auxiliary(args):
 					train_metrics = wrapper_model.get_metrics(reset=True)
 					dev_metrics = wrapper_model.evaluate_classifier(set_='dev')
 					test_metrics = wrapper_model.evaluate_classifier(set_='test')
+					f1_metric_ = {
+						'train': train_metrics['f1'],
+						'dev': dev_metrics['f1'],
+						'test': test_metrics['f1']
+					}
+					wrapper_model.push_metric_to_tensorboard(f1_metric_, global_step, 'primtask.f1')
+					acc_metric_ = {
+						'train': train_metrics['accuracy'],
+						'dev': dev_metrics['accuracy'],
+						'test': test_metrics['accuracy']
+					}
+					wrapper_model.push_metric_to_tensorboard(acc_metric_, global_step, 'primtask.acc')
+
 					for k, v in train_metrics.items():
 						print_out = "[{}] | Train : {:.3f} | Dev Set : {:.3f} | Test Set : {:.3f}".format(k, v, dev_metrics[k], test_metrics[k])
 						logger.info(print_out)
 					classifier_dev_perfs.append(dev_metrics[args.classf_metric])
+
+
+
 					if dev_metrics[args.classf_metric] >= max(classifier_dev_perfs):
 						# We want to save the best model here
 						print('Current best dev f1 = {} achieved. Saving model'.format(dev_metrics[args.classf_metric]))
@@ -398,7 +419,6 @@ def auto_auxiliary(args):
 			if args.max_steps > 0 and global_step > args.max_steps:
 				epoch_iterator.close()
 				break
-	
 	# Close the tensorboard writer
 	wrapper_model.close_writer()
 	return model, wrapper_model, tokenizer, global_step
@@ -522,8 +542,8 @@ def main():
 	)
 	parser.add_argument("--base_wd", type=float, default=0.01)
 	parser.add_argument("--learning_rate", default=5e-5, type=float, help="The initial learning rate for Adam.")
-	parser.add_argument("--weight_decay", default=0.0, type=float, help="Weight decay if we apply some.")
-	parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
+	parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
+	parser.add_argument("--adam_epsilon", default=1e-6, type=float, help="Epsilon for Adam optimizer.")
 	parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
 	parser.add_argument(
 		"--num_train_epochs", default=1.0, type=float, help="Total number of training epochs to perform."

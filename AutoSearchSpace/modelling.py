@@ -241,7 +241,6 @@ class ModelWithAuxTasks(AutoModel):
 		vocab = self.datasets['train']['vocab']
 		self.setup_classifier(dropout, self.primary_task_info['prim_task_id'], vocab, embedding_dim, ff_multiplier, num_layers=num_layers)
 		# Setup the other outputs here
-		return
 		for aux_loss_config in searchOpts.get_valid_configs():
 			key_ = ".".join([str(x) for x in aux_loss_config])
 			if searchOpts.is_tokenlevel(aux_loss_config[-1]):
@@ -528,6 +527,8 @@ class ModelWithAuxTasks(AutoModel):
 		self.tboard_writer.add_scalars('aux.lossxweights', prods_, step_)
 		self.tboard_writer.add_scalars('aux.gradnorms', norms_, step_)
 
+	def push_metric_to_tensorboard(self, metric, step_, metric_name):
+		self.tboard_writer.add_scalars(metric_name, metric, step_)
 
 	# At the end of this, all the model gradients should be populated appropriately 
 	def get_grads_with_auxiliaries(self, aux_config_w_batch, searchOpts):
@@ -583,7 +584,7 @@ class ModelWithAuxTasks(AutoModel):
 			if prim_norm is None:
 				assert is_prim, 'The primary task should be the first to be run'
 				prim_norm = task_norm
-			norm_weighting = prim_norm / task_norm
+			norm_weighting = 1.0 # prim_norm / task_norm
 			weighted_loss = (loss_ * this_weight * norm_weighting) / self.grad_accum_factor
 			weighted_loss.backward()
 			self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight))
