@@ -102,7 +102,7 @@ def add_modelling_options(parser):
 
 	return parser
 
-
+import pdb
 class ModelWithLMHead(nn.Module):
 	def __init__(self, base_model, model_name):
 		super().__init__()
@@ -110,7 +110,16 @@ class ModelWithLMHead(nn.Module):
 		config = AutoConfig.from_pretrained(model_name)
 		self.lm_head = RobertaLMHead(config)
 		self._loss = torch.nn.CrossEntropyLoss(reduction='none')
-	
+		self.copy_base_lm_head(base_model)
+
+	def copy_base_lm_head(self, base_model):
+		with torch.no_grad():
+			self_head_params = dict(self.lm_head.named_parameters())
+			for k, v in base_model.lm_head.named_parameters():
+				self_head_params[k].copy_(v)
+				assert self_head_params[k].mean().item() == v.mean().item()
+
+
 	def forward(self, tokens, labels, attn_mask=None):
 		embedded_text = self._text_field_embedder(tokens, attention_mask=attn_mask)
 		if isinstance(tokens, dict):
@@ -219,6 +228,7 @@ class ModelWithAuxTasks(AutoModel):
 			else:
 				vocab = Vocabulary.from_instances(all_instances)
 				label_vocab = vocab
+				assert idx_ == 'train', 'Train must be the first index so we load the vocab'
 
 			all_labels = []
 			for instance in all_instances:
@@ -548,8 +558,7 @@ class ModelWithAuxTasks(AutoModel):
 		prim_batch = {'input':sent_dict , 'output':labels, 'rep_mask': None}
 		aux_config_w_batch.update({self.primary_task_info['prim_task_id']: prim_batch})
 		aux_weights, prim_weight = searchOpts.get_weighttensor_nograd()
-		
-		prim_norm = None
+
 		for aux_loss_config in key_order:
 			batch = aux_config_w_batch[aux_loss_config]
 			is_prim = not isinstance(aux_loss_config, tuple)
@@ -581,11 +590,8 @@ class ModelWithAuxTasks(AutoModel):
 				this_weight = aux_weights[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
 			else:
 				this_weight = prim_weight.item()
-			if prim_norm is None:
-				assert is_prim, 'The primary task should be the first to be run'
-				prim_norm = task_norm
-			norm_weighting = 1.0 # prim_norm / task_norm
-			weighted_loss = (loss_ * this_weight * norm_weighting) / self.grad_accum_factor
+
+			weighted_loss = (loss_ * this_weight) / self.grad_accum_factor
 			weighted_loss.backward()
 			self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight))
 
