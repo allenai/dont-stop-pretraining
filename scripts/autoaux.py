@@ -173,7 +173,7 @@ def auto_auxiliary(args):
 	dtform_and_itr = DataTransformAndItr(args, aux_dataOptions, autoloss_config.get_stage(1), autoloss_config.get_stage(-1))
 
 	# Create the search options object
-	searchOpts = SearchOptions(autoloss_config, args.searchopt_lr, is_cuda=True)
+	searchOpts = SearchOptions(autoloss_config, args.searchopt_lr, use_factored_model=args.use_factored_model, is_cuda=True)
 
 	# enumerate the valid loss configs and get iterators for each loss type
 	data_iterators = {}

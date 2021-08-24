@@ -2,10 +2,12 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from config import Config
+from torch.optim import SGD
 
 def add_searchspace_args(parser):
 	parser.add_argument('-searchopt-lr', type=float, default=1e-4)
 	parser.add_argument('-num-config-samples', type=int, default=16)
+	parser.add_argument('-use-factored-model', action='store_true')
 
 
 def create_tensor(shape, init=0.0, requires_grad=True, is_cuda=True):
@@ -15,9 +17,9 @@ def create_tensor(shape, init=0.0, requires_grad=True, is_cuda=True):
 	if requires_grad:
 		weights.requires_grad = True
 	return weights
-
+import pdb
 class SearchOptions(object):
-	def __init__(self, config, weight_lr, is_cuda=True):
+	def __init__(self, config, weight_lr, use_factored_model=True, is_cuda=True):
 		self.config = config  # Store in case
 		self.weight_lr = weight_lr
 		self.weights = {}
@@ -30,7 +32,7 @@ class SearchOptions(object):
 			stage_name, ids_ = self.config.get_stage_w_name(stage_id)
 			shape = list(base_shape)
 			shape[stage_id] = len(ids_)
-			st_weights = create_tensor(shape, requires_grad=True, is_cuda=is_cuda)
+			st_weights = create_tensor(shape, requires_grad=use_factored_model, is_cuda=is_cuda)
 			self.weights[stage_name] = st_weights
 			all_dims[stage_id] = shape[stage_id]
 			self.stage_order.append(stage_name)
@@ -42,7 +44,8 @@ class SearchOptions(object):
 		self.prim_weight =  create_tensor((1,), requires_grad=True, is_cuda=is_cuda)
 		self.config_upstream_grad = create_tensor(all_dims, requires_grad=False, is_cuda=is_cuda)
 		self.prim_upstream_grad = create_tensor((1,), requires_grad=False, is_cuda=is_cuda)
-	
+
+
 	def get_valid_configs(self):
 		return self.valid_configurations
 	
@@ -118,13 +121,15 @@ class SearchOptions(object):
 	def update_weighttensor(self):
 		self.set_weightensor_grads(self.config_upstream_grad, self.prim_upstream_grad)
 		# Todo [ldery] - possibly implement exponentiated gradient descent if necessary
+		num_params = self.weights['all'].numel()
 		with torch.no_grad():
 			for _, weight in self.weights.items():
 				if not weight.requires_grad:
 					continue
 				if weight.grad is None:
 					weight.grad = torch.zeros_like(weight)
-				new_weight = weight - (self.weight_lr * weight.grad)
+				factor = weight.numel() / num_params
+				new_weight = weight - (self.weight_lr * weight.grad * factor)
 				weight.copy_(new_weight)
 				weight.grad.zero_()
 			# Perform updates on the primary weight
@@ -133,6 +138,7 @@ class SearchOptions(object):
 			self.prim_weight.copy_(new_prim)
 			self.prim_weight.grad.zero_()
 		self.clear_grads()
+
 
 	def is_tokenlevel(self, output_id):
 		return self.config.is_tokenlevel(output_id)

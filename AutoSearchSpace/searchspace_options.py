@@ -1,5 +1,16 @@
 from copy import deepcopy
 
+VVBASIC = {
+	'input-space' : ['Task'],
+	'input-tform-space': ['Replace', 'Mask'],
+	'rep-tform-space' : ['None'],
+	'out-token-space' : ['DENOISE'],
+	'out-sent-space': [],
+}
+VVBASIC['out-space'] = [*VVBASIC['out-token-space'], *VVBASIC['out-sent-space']]
+
+
+
 VBASIC = {
 	'input-space' : ['Task'],
 	'input-tform-space': ['None', 'Replace', 'Mask'],
@@ -58,6 +69,8 @@ def get_config(name):
 		config = FULL
 	elif name == 'vbasic':
 		config = VBASIC
+	elif name == 'vbasic.nonone':
+		config = VVBASIC
 	assert config is not None, 'Wrong Config name given : {}'.format(name)
 	return config
 
