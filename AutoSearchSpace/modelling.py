@@ -17,6 +17,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 import os
 import sys
+import gc
 import math
 PATH="/home/ldery/projects/AutoAuxiliaryLoss/dont_stop_pretraining/"
 sys.path.insert(1, PATH)
@@ -99,7 +100,7 @@ def add_modelling_options(parser):
 	parser.add_argument("--classf_patience", type=int, default=5)
 	parser.add_argument("--classf_lr", type=float, default=2e-5, help="Learning rate of classifier")
 	parser.add_argument("--classf_ft_lr", type=float, default=2e-6, help="Learning rate of classifier for finetuning")
-
+	parser.add_argument("--dev_fit_iters", type=int, default=10, help="Number of iterations to run fitting dev head")
 	return parser
 
 import pdb
@@ -477,15 +478,25 @@ class ModelWithAuxTasks(AutoModel):
 		samples = self.get_classifier_samples(self.datasets['train'], self.dev_batch_sz)
 		prev_loss_, tol = 1e10, 1e-3
 		all_metrics = [[], [], []]
-		for i in range(self.options.classf_ft_iters):
-			output = this_head(*samples)
-			loss_ = output['loss']
-			# This ensures that we only train the dev-head and keep the body fixed
-			grads = torch.autograd.grad(loss_, dev_params, allow_unused=True)
-			for p, g in zip(dev_params, grads):
-				assert g is not None, 'This should have a gradient'
-				p.grad = g
+		for i in range(self.options.dev_fit_iters):
+			base_bsz = 36
+			num_iters = math.ceil(self.dev_batch_sz / base_bsz)
+			for k in range(num_iters):
+				start_id, end_id = k * base_bsz, (k + 1) * base_bsz
+				this_sent, this_labels = samples[0][start_id: end_id],  samples[1][start_id: end_id]
+				output = this_head(this_sent, this_labels)
+				loss_ = output['loss']
+				# This ensures that we only train the dev-head and keep the body fixed
+				grads = torch.autograd.grad(loss_, dev_params, allow_unused=True)
+				with torch.no_grad():
+					for p, g in zip(dev_params, grads):
+						assert g is not None, 'This should have a gradient'
+						if p.grad is None:
+							p.grad = torch.zeros_like(p)
+						p.grad.add_(g / num_iters)
+						del g
 			dev_optim.step()
+			dev_optim.zero_grad()
 
 			# Save performance for analysis
 			metrics = self.get_metrics(head_=this_head, reset=True)
@@ -499,6 +510,7 @@ class ModelWithAuxTasks(AutoModel):
 			del grads
 			del loss_
 			torch.cuda.empty_cache()
+			gc.collect()
 
 		# Save performance for analysis
 		self.dev_head_perfs['f1'].append(np.mean(all_metrics[0]))
