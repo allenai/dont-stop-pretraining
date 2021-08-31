@@ -462,6 +462,7 @@ class ModelWithAuxTasks(AutoModel):
 							)
 			# Setup optimizer for dev head
 			dev_params = self.get_classifier_params([head_name], withbase=False)
+
 			assert dev_params is not None, 'Dev Params should have been instantiated above'
 			dev_optim =  AdamW(
 									dev_params, betas=eval(self.options.classf_betas),
@@ -511,7 +512,6 @@ class ModelWithAuxTasks(AutoModel):
 			del loss_
 			torch.cuda.empty_cache()
 			gc.collect()
-
 		# Save performance for analysis
 		self.dev_head_perfs['f1'].append(np.mean(all_metrics[0]))
 		self.dev_head_perfs['accuracy'].append(np.mean(all_metrics[1]))
@@ -527,7 +527,7 @@ class ModelWithAuxTasks(AutoModel):
 			self.tboard_writer.add_scalar('dev.head.perfs.{}'.format(k), v[-1], step_)
 
 		aux_cosines, losses_, weights_, prods_  = {}, {}, {}, {}
-		norms_ = {}
+		norms_, raw_weights_ = {}, {}
 		for k, v in self.weight_stats.items():
 			values = [x[-1] for x in v[-self.grad_accum_factor:]]
 			aux_cosines[k] = np.mean(values)
@@ -542,10 +542,14 @@ class ModelWithAuxTasks(AutoModel):
 			values = [x[1] for x in v_l[-self.grad_accum_factor:]]
 			weights_[k] = np.mean(values)
 			prods_[k] = weights_[k] * losses_[k]
+			
+			values = [x[-1] for x in v_l[-self.grad_accum_factor:]]
+			raw_weights_[k] = np.mean(values)
 
 		self.tboard_writer.add_scalars('aux.cosines', aux_cosines, step_)
 		self.tboard_writer.add_scalars('aux.losses', losses_, step_)
 		self.tboard_writer.add_scalars('aux.weights', weights_, step_)
+		self.tboard_writer.add_scalars('aux.raw_weights', raw_weights_, step_)
 		self.tboard_writer.add_scalars('aux.lossxweights', prods_, step_)
 		self.tboard_writer.add_scalars('aux.gradnorms', norms_, step_)
 
@@ -570,6 +574,7 @@ class ModelWithAuxTasks(AutoModel):
 		prim_batch = {'input':sent_dict , 'output':labels, 'rep_mask': None}
 		aux_config_w_batch.update({self.primary_task_info['prim_task_id']: prim_batch})
 		aux_weights, prim_weight = searchOpts.get_weighttensor_nograd()
+		raw_aux_weights, raw_prim_weight = searchOpts.get_weighttensor_nograd(softmax=False)
 
 		for aux_loss_config in key_order:
 			batch = aux_config_w_batch[aux_loss_config]
@@ -600,12 +605,14 @@ class ModelWithAuxTasks(AutoModel):
 			# Add this to the model gradients
 			if not is_prim:
 				this_weight = aux_weights[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
+				raw_weight = raw_aux_weights[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
 			else:
 				this_weight = prim_weight.item()
+				raw_weight = raw_prim_weight.item()
 
 			weighted_loss = (loss_ * this_weight) / self.grad_accum_factor
 			weighted_loss.backward()
-			self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight))
+			self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight, raw_weight))
 
 
 	# We train the primary head. This is further finetuning on top pre-training

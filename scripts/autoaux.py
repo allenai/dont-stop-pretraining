@@ -55,7 +55,7 @@ from transformers import (
 )
 
 import sys
-PATH="/home/ldery/projects/AutoAuxiliaryLoss/AutoSearchSpace/"
+PATH="/home/ldery/projects/AutoAuxiliaryLossCpy/AutoSearchSpace/"
 sys.path.insert(1, PATH)
 
 from config import add_config_args, Config
@@ -138,7 +138,8 @@ def save_chkpt(args, id_, model, tokenizer, optimizer, scheduler, rotate_chkpt=T
 		_rotate_checkpoints(args, checkpoint_prefix)
 
 	torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-	torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+	if scheduler is not None:
+		torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
 	logger.info("Saving optimizer and scheduler states to %s", output_dir)
 
 
@@ -173,7 +174,7 @@ def auto_auxiliary(args):
 	dtform_and_itr = DataTransformAndItr(args, aux_dataOptions, autoloss_config.get_stage(1), autoloss_config.get_stage(-1))
 
 	# Create the search options object
-	searchOpts = SearchOptions(autoloss_config, args.searchopt_lr, use_factored_model=args.use_factored_model, is_cuda=True)
+	searchOpts = SearchOptions(autoloss_config, args.searchopt_lr, step_every=args.step_meta_every, use_factored_model=args.use_factored_model, is_cuda=True)
 
 	# enumerate the valid loss configs and get iterators for each loss type
 	data_iterators = {}
@@ -252,7 +253,7 @@ def auto_auxiliary(args):
 						optimizer_grouped_parameters, betas=eval(args.classf_betas),
 						lr=args.learning_rate, eps=args.adam_epsilon, weight_decay=args.base_wd
 					)
-	scheduler = get_linear_schedule_with_warmup(
+	scheduler = None if args.no_scheduler else get_linear_schedule_with_warmup(
 		optimizer, num_warmup_steps=int(args.classf_warmup_frac * t_total), num_training_steps=t_total
 	)
 	
@@ -262,7 +263,7 @@ def auto_auxiliary(args):
 								classifier_params, betas=eval(args.classf_betas),
 								weight_decay=args.classf_wd, lr=args.classf_lr
 							)
-	classifier_scheduler = get_linear_schedule_with_warmup(
+	classifier_scheduler = None if args.no_scheduler else get_linear_schedule_with_warmup(
 		classifier_optim, num_warmup_steps=int(args.classf_warmup_frac * t_total), num_training_steps=t_total
 	)
 	
@@ -353,12 +354,14 @@ def auto_auxiliary(args):
 				
 				# Step on the head parameters
 				classifier_optim.step()
-				classifier_scheduler.step()
+				if classifier_scheduler is not None:
+					classifier_scheduler.step()
 				classifier_optim.zero_grad()
 				
 				# Step on the body parameters
 				optimizer.step()
-				scheduler.step()  # Update learning rate schedule
+				if scheduler is not None:
+					scheduler.step()  # Update learning rate schedule
 				model.zero_grad()
 				global_step += 1
 
@@ -573,7 +576,7 @@ def main():
 		"--overwrite_cache", action="store_true", help="Overwrite the cached training and evaluation sets"
 	)
 	parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
-
+	parser.add_argument("--no-scheduler", action='store_true')
 	parser.add_argument(
 		"--fp16",
 		action="store_true",

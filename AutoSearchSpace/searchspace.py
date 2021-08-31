@@ -2,12 +2,14 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from config import Config
-from torch.optim import SGD
+from torch.optim import SGD, Adam
 
 def add_searchspace_args(parser):
 	parser.add_argument('-searchopt-lr', type=float, default=1e-4)
 	parser.add_argument('-num-config-samples', type=int, default=16)
 	parser.add_argument('-use-factored-model', action='store_true')
+	parser.add_argument('-step-meta-every', type=int, default=1)
+
 
 
 def create_tensor(shape, init=0.0, requires_grad=True, is_cuda=True):
@@ -17,12 +19,15 @@ def create_tensor(shape, init=0.0, requires_grad=True, is_cuda=True):
 	if requires_grad:
 		weights.requires_grad = True
 	return weights
+
 import pdb
 class SearchOptions(object):
-	def __init__(self, config, weight_lr, use_factored_model=True, is_cuda=True):
+	def __init__(self, config, weight_lr, step_every=1, use_factored_model=True, is_cuda=True):
 		self.config = config  # Store in case
 		self.weight_lr = weight_lr
 		self.weights = {}
+		self.step_every = step_every
+		self.step_counter = 0
 
 		num_stages = self.config.num_stages()
 		base_shape = [1 for _ in range(num_stages)]
@@ -40,7 +45,7 @@ class SearchOptions(object):
 		self.stage_order.append('all')
 		self.valid_configurations = None
 		self.create_mask_for_illegal(all_dims, is_cuda)
-		
+
 		self.prim_weight =  create_tensor((1,), requires_grad=True, is_cuda=is_cuda)
 		self.config_upstream_grad = create_tensor(all_dims, requires_grad=False, is_cuda=is_cuda)
 		self.prim_upstream_grad = create_tensor((1,), requires_grad=False, is_cuda=is_cuda)
@@ -82,22 +87,29 @@ class SearchOptions(object):
 							self.valid_configurations.append((i, j, k, l))
 
 
-	def get_weighttensor_nograd(self):
+	def get_weighttensor_nograd(self, softmax=True):
 		with torch.no_grad():
-			return self.get_weighttensor_wgrad()
+			return self.get_weighttensor_wgrad(softmax=softmax)
 
 	# Todo [ldery] - need to test this effectively
 	def get_weighttensor_wgrad(self, softmax=True):
 		this_tensor = sum([self.weights[name] for name in self.stage_order])
 		shape = this_tensor.shape
+		this_prim = self.prim_weight
+		# Todo [ldery] - make sure to clean this up so it doesn't lead to a bug
+		for k, v in self.weights.items():
+			if k == 'all' or k == 'O' or k == 'mask':
+				continue
+			this_prim = this_prim + v[0, 0, 0, 0]
+
 		if softmax:
-			full_ = torch.cat((this_tensor.view(-1), self.prim_weight))
+			full_ = torch.cat((this_tensor.view(-1), this_prim))
 			# Compute Normalization over all entries
 			sm = F.softmax(full_, dim=-1)
 			sm_reshaped = sm[:-1].view(*shape)
 			return sm_reshaped, sm[-1]
 		else:
-			return this_tensor, self.prim_weight
+			return this_tensor, this_prim
 
 	# Not the cleanest way to do this but it's ok for now
 	def update_grad(self, config, grad):
@@ -119,24 +131,26 @@ class SearchOptions(object):
 		proxy_loss.backward()
 
 	def update_weighttensor(self):
+		self.step_counter += 1
 		self.set_weightensor_grads(self.config_upstream_grad, self.prim_upstream_grad)
-		# Todo [ldery] - possibly implement exponentiated gradient descent if necessary
-		num_params = self.weights['all'].numel()
-		with torch.no_grad():
-			for _, weight in self.weights.items():
-				if not weight.requires_grad:
-					continue
-				if weight.grad is None:
-					weight.grad = torch.zeros_like(weight)
-				factor = weight.numel() / num_params
-				new_weight = weight - (self.weight_lr * weight.grad * factor)
-				weight.copy_(new_weight)
-				weight.grad.zero_()
-			# Perform updates on the primary weight
-			assert self.prim_weight.grad is not None, 'Prim Weight should have gradients'
-			new_prim = self.prim_weight - (self.weight_lr * self.prim_weight.grad)
-			self.prim_weight.copy_(new_prim)
-			self.prim_weight.grad.zero_()
+		if (self.step_counter % self.step_every) == 0:
+			num_params = self.weights['all'].numel()
+			with torch.no_grad():
+				for _, weight in self.weights.items():
+					if not weight.requires_grad:
+						continue
+					if weight.grad is None:
+						weight.grad = torch.zeros_like(weight)
+					factor = (weight.numel() / num_params) / self.step_every
+					new_weight = weight - (self.weight_lr * weight.grad * factor)
+					weight.copy_(new_weight)
+					weight.grad.zero_()
+				# Perform updates on the primary weight
+				assert self.prim_weight.grad is not None, 'Prim Weight should have gradients'
+				factor = 1.0 / self.step_every
+				new_prim = self.prim_weight - (self.weight_lr * self.prim_weight.grad * factor)
+				self.prim_weight.copy_(new_prim)
+				self.prim_weight.grad.zero_()
 		self.clear_grads()
 
 
