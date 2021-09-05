@@ -566,53 +566,77 @@ class ModelWithAuxTasks(AutoModel):
 		dev_id = "dev-{}".format(self.primary_task_info['prim_task_id'])
 		dev_head_grads = self.set_dev_head()[:self.body_params_end]
 		dev_norm = calc_norm(dev_head_grads)
-		auxloss_cosines = {}
 
 		key_order = [self.primary_task_info['prim_task_id']]
 		key_order.extend(aux_config_w_batch.keys())
 		sent_dict, labels = self.get_classifier_samples(self.datasets['train'], self.batch_sz)
 		prim_batch = {'input':sent_dict , 'output':labels, 'rep_mask': None}
 		aux_config_w_batch.update({self.primary_task_info['prim_task_id']: prim_batch})
-		aux_weights, prim_weight = searchOpts.get_weighttensor_nograd()
-		raw_aux_weights, raw_prim_weight = searchOpts.get_weighttensor_nograd(softmax=False)
+		normed_weights = searchOpts.get_weighttensor_nograd()
+		raw_weights = searchOpts.get_weighttensor_nograd(softmax=False)
 
 		for aux_loss_config in key_order:
 			batch = aux_config_w_batch[aux_loss_config]
 			is_prim = not isinstance(aux_loss_config, tuple)
-			human_readable = searchOpts.get_config_human_readable(aux_loss_config) if not is_prim else aux_loss_config
-			if not is_prim:
-				task_id = ".".join([str(x) for x in aux_loss_config])
-			else:
-				task_id = aux_loss_config
-			this_head = getattr(self, "AuxHead-{}".format(task_id), None)
-			assert this_head is not None, 'Auxiliary Classifier {} not found'.format(task_id)
-			for k, v in batch.items():
-				if isinstance(v, torch.Tensor):
-					batch[k] = v.cuda()
-			input_, output_, rep_mask = batch['input'], batch['output'], batch['rep_mask']
-			loss_ = this_head(input_, output_, attn_mask=rep_mask)['loss']
-			gradients = torch.autograd.grad(loss_, this_head.parameters(), allow_unused=True, retain_graph=True)
+			try:
+				self.run_one_auxconfig(
+										aux_loss_config, batch, (normed_weights, raw_weights),
+										searchOpts, dev_head_grads, dev_norm, is_prim=is_prim
+									)
+			except RuntimeError as e:
+				if 'out of memory' in str(e):
+					print('| WARNING: ran out of memory when running auxiliary config. Retrying')
+					torch.cuda.empty_cache()
+					gc.collect()
+					self.run_one_auxconfig(
+										aux_loss_config, batch, (normed_weights, raw_weights),
+										searchOpts, dev_head_grads, dev_norm, is_prim=is_prim
+									)
+				else:
+					raise e
 
-			this_grads = gradients[:self.body_params_end]
-			task_norm = calc_norm(this_grads)
-			per_param_dp = []
-			cos_sim = dot_prod(dev_head_grads, this_grads, ppdp=per_param_dp)
-			cos_sim = (cos_sim / (dev_norm * task_norm)) 
-			self.weight_stats[human_readable].append((dev_norm.item(), task_norm.item(), cos_sim))
-			cos_sim = cos_sim / self.grad_accum_factor
-			self.per_param_dp[human_readable].append(per_param_dp)
-			searchOpts.update_grad(aux_loss_config, -cos_sim)
-			# Add this to the model gradients
-			if not is_prim:
-				this_weight = aux_weights[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
-				raw_weight = raw_aux_weights[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
-			else:
-				this_weight = prim_weight.item()
-				raw_weight = raw_prim_weight.item()
+	def run_one_auxconfig(
+			self, aux_loss_config, batch, weights, 
+			searchOpts, dev_head_grads, dev_norm, is_prim=False
+	):
+		normed_weights, raw_weights = weights
+		aux_weights, prim_weight = normed_weights
+		raw_aux_weights, raw_prim_weight = raw_weights
 
-			weighted_loss = (loss_ * this_weight) / self.grad_accum_factor
-			weighted_loss.backward()
-			self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight, raw_weight))
+		human_readable = searchOpts.get_config_human_readable(aux_loss_config) if not is_prim else aux_loss_config
+		if not is_prim:
+			task_id = ".".join([str(x) for x in aux_loss_config])
+		else:
+			task_id = aux_loss_config
+		this_head = getattr(self, "AuxHead-{}".format(task_id), None)
+		assert this_head is not None, 'Auxiliary Classifier {} not found'.format(task_id)
+		for k, v in batch.items():
+			if isinstance(v, torch.Tensor):
+				batch[k] = v.cuda()
+		input_, output_, rep_mask = batch['input'], batch['output'], batch['rep_mask']
+		loss_ = this_head(input_, output_, attn_mask=rep_mask)['loss']
+		gradients = torch.autograd.grad(loss_, this_head.parameters(), allow_unused=True, retain_graph=True)
+
+		this_grads = gradients[:self.body_params_end]
+		task_norm = calc_norm(this_grads)
+		per_param_dp = []
+		cos_sim = dot_prod(dev_head_grads, this_grads, ppdp=per_param_dp)
+		cos_sim = (cos_sim / (dev_norm * task_norm)) 
+		self.weight_stats[human_readable].append((dev_norm.item(), task_norm.item(), cos_sim))
+		cos_sim = cos_sim / self.grad_accum_factor
+		self.per_param_dp[human_readable].append(per_param_dp)
+		searchOpts.update_grad(aux_loss_config, -cos_sim)
+		# Add this to the model gradients
+		if not is_prim:
+			this_weight = aux_weights[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
+			raw_weight = raw_aux_weights[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
+		else:
+			this_weight = prim_weight.item()
+			raw_weight = raw_prim_weight.item()
+
+		weighted_loss = (loss_ * this_weight) / self.grad_accum_factor
+		weighted_loss.backward()
+		self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight, raw_weight))
 
 
 	# We train the primary head. This is further finetuning on top pre-training

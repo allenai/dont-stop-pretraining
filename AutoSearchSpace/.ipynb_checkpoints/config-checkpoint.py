@@ -11,7 +11,7 @@ from searchspace_options import (
 )
 
 def add_config_args(parser):
-	parser.add_argument('-searchspace-config', type=str, default='basic', choices=['basic', 'vbasic', 'with-illegal', 'vbasic.nonone', 'full'])
+	parser.add_argument('-searchspace-config', type=str, default='basic', choices=['basic', 'vbasic', 'with-illegal', 'vbasic1', 'full'])
 
 
 class Config(object):
