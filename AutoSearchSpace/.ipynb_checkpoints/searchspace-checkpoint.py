@@ -9,7 +9,7 @@ def add_searchspace_args(parser):
 	parser.add_argument('-num-config-samples', type=int, default=16)
 	parser.add_argument('-use-factored-model', action='store_true')
 	parser.add_argument('-step-meta-every', type=int, default=1)
-
+	parser.add_argument('-use-EG', action='store_true')
 
 
 def create_tensor(shape, init=0.0, requires_grad=True, is_cuda=True):
@@ -22,7 +22,7 @@ def create_tensor(shape, init=0.0, requires_grad=True, is_cuda=True):
 
 import pdb
 class SearchOptions(object):
-	def __init__(self, config, weight_lr, step_every=1, use_factored_model=True, is_cuda=True):
+	def __init__(self, config, weight_lr, use_EG= False, step_every=1, use_factored_model=True, is_cuda=True):
 		self.config = config  # Store in case
 		self.weight_lr = weight_lr
 		self.weights = {}
@@ -33,22 +33,30 @@ class SearchOptions(object):
 		base_shape = [1 for _ in range(num_stages)]
 		all_dims = list(base_shape)
 		self.stage_order = []
+		prim_task_info = ['Task', 'None', 'None']
+		self.primary_task_rep = {}
 		for stage_id in range(num_stages):
 			stage_name, ids_ = self.config.get_stage_w_name(stage_id)
+			if stage_id != (num_stages - 1):
+				prim_idx = list(ids_.values()).index(prim_task_info[stage_id])
+				self.primary_task_rep[stage_name] = prim_idx
+			# Add the primary task to the output
 			shape = list(base_shape)
 			shape[stage_id] = len(ids_)
-			st_weights = create_tensor(shape, requires_grad=use_factored_model, is_cuda=is_cuda)
+			st_weights = create_tensor(shape, init=int(use_EG), requires_grad=use_factored_model, is_cuda=is_cuda)
 			self.weights[stage_name] = st_weights
 			all_dims[stage_id] = shape[stage_id]
 			self.stage_order.append(stage_name)
-		self.weights['all'] = create_tensor(all_dims, requires_grad=True, is_cuda=is_cuda)
+		self.weights['all'] = create_tensor(all_dims, init=int(use_EG), requires_grad=True, is_cuda=is_cuda)
 		self.stage_order.append('all')
 		self.valid_configurations = None
 		self.create_mask_for_illegal(all_dims, is_cuda)
 
-		self.prim_weight =  create_tensor((1,), requires_grad=True, is_cuda=is_cuda)
-		self.config_upstream_grad = create_tensor(all_dims, requires_grad=False, is_cuda=is_cuda)
-		self.prim_upstream_grad = create_tensor((1,), requires_grad=False, is_cuda=is_cuda)
+		self.prim_weight =  create_tensor((1,), init=int(use_EG), requires_grad=True, is_cuda=is_cuda)
+		self.prim_output_weight = create_tensor((1,), init=int(use_EG), requires_grad=True, is_cuda=is_cuda)
+		self.config_upstream_grad = create_tensor(all_dims,init=int(use_EG), requires_grad=False, is_cuda=is_cuda)
+		self.prim_upstream_grad = create_tensor((1,), init=int(use_EG), requires_grad=False, is_cuda=is_cuda)
+		self.use_EG = use_EG
 
 
 	def get_valid_configs(self):
@@ -95,11 +103,11 @@ class SearchOptions(object):
 	def get_weighttensor_wgrad(self, softmax=True):
 		this_tensor = sum([self.weights[name] for name in self.stage_order])
 		shape = this_tensor.shape
-		this_prim = self.prim_weight
-		# Todo [ldery] - make sure to clean this up so it doesn't lead to a bug
+		this_prim = self.prim_weight + self.prim_output_weight
 		for k, v in self.weights.items():
-			if k == 'all' or k == 'O' or k == 'mask':
+			if k not in self.primary_task_rep:
 				continue
+			assert self.primary_task_rep[k] == 0, 'None should always have the first index for {}'.format(k)
 			this_prim = this_prim + v[0, 0, 0, 0]
 
 		if softmax:
@@ -129,28 +137,70 @@ class SearchOptions(object):
 
 		proxy_loss = (prim_weight * prim_upstream_grad).sum()
 		proxy_loss.backward()
+		
+	
+	def get_exp_update(self, weight, is_output=False, factor=None):
+		if factor is None:
+			num_params = self.weights['all'].numel()
+			factor = ((weight.numel() + int(is_output)) / num_params) / self.step_every
+		return weight * torch.exp(-self.weight_lr * weight.grad * factor)
+
+	def update_single_weight(self, weight, is_output=False, factor=None):
+		if factor is None:
+			num_params = self.weights['all'].numel()
+			factor = ((weight.numel() + int(is_output)) / num_params) / self.step_every
+		new_weight = weight - (self.weight_lr * weight.grad * factor)
+		weight.copy_(new_weight)
+		weight.grad.zero_()
 
 	def update_weighttensor(self):
 		self.step_counter += 1
 		self.set_weightensor_grads(self.config_upstream_grad, self.prim_upstream_grad)
 		if (self.step_counter % self.step_every) == 0:
-			num_params = self.weights['all'].numel()
+			output_norm, all_norm = None, None
 			with torch.no_grad():
-				for _, weight in self.weights.items():
+				for key, weight in self.weights.items():
 					if not weight.requires_grad:
 						continue
 					if weight.grad is None:
 						weight.grad = torch.zeros_like(weight)
-					factor = (weight.numel() / num_params) / self.step_every
-					new_weight = weight - (self.weight_lr * weight.grad * factor)
-					weight.copy_(new_weight)
-					weight.grad.zero_()
+					if not self.use_EG:
+						self.update_single_weight(weight, is_output=(key == 'O')) # poor design but for now being lazy
+					else:
+						this_weight = self.get_exp_update(weight, is_output=(key == 'O'))
+						weight.copy_(this_weight)
+						if (key != 'O') and (key != 'all'): # poor design but for now being lazy
+							weight.div_(this_weight.sum())
+							weight.grad.zero_()
+						else:
+							output_norm = this_weight.sum() if key == 'O' else output_norm
+							all_norm = this_weight.sum() if key == 'all' else all_norm
 				# Perform updates on the primary weight
 				assert self.prim_weight.grad is not None, 'Prim Weight should have gradients'
+				assert self.prim_output_weight.grad is not None, 'Prim Output Weight should have gradients'
 				factor = 1.0 / self.step_every
-				new_prim = self.prim_weight - (self.weight_lr * self.prim_weight.grad * factor)
-				self.prim_weight.copy_(new_prim)
-				self.prim_weight.grad.zero_()
+				if not self.use_EG:
+					self.update_single_weight(self.prim_weight, factor=factor)
+					self.update_single_weight(self.prim_output_weight, is_output=True)
+				else:
+					# Update the primary weights
+					this_weight = self.get_exp_update(self.prim_weight, factor=factor)
+					self.prim_weight.copy_(this_weight)
+					normalizer = self.prim_weight + all_norm
+					self.prim_weight.div_(normalizer)
+					self.weights['all'].div_(normalizer)
+					self.prim_weight.grad.zero_()
+					self.weights['all'].grad.zero_()
+					
+					# Update primary output weights
+					this_weight = self.get_exp_update(self.prim_output_weight, is_output=True)
+					self.prim_output_weight.copy_(this_weight)
+					normalizer = self.prim_output_weight + output_norm
+					self.prim_output_weight.div_(normalizer)
+					self.weights['O'].div_(normalizer)
+					self.prim_output_weight.grad.zero_()
+					self.weights['O'].grad.zero_()
+
 		self.clear_grads()
 
 
