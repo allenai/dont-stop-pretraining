@@ -17,7 +17,6 @@ def mask_tokens(inputs, tokenizer, proba, tform):
 		raise ValueError(
 			"This tokenizer does not have a mask token which is necessary for masked language modeling. Remove the --mlm flag if you want to use this tokenizer."
 		)
-
 	labels = inputs.clone()
 	# We sample a few tokens in each sequence for masked-LM training (with probability args.mlm_probability defaults to 0.15 in Bert/RoBERTa)
 	probability_matrix = torch.full(labels.shape, proba)
@@ -32,12 +31,10 @@ def mask_tokens(inputs, tokenizer, proba, tform):
 	labels[~masked_indices] = -100	# We only compute loss on masked tokens
 
 	if tform == 'Mask':
-		indices_replaced = torch.bernoulli(torch.full(labels.shape, 1.0)).bool() & masked_indices
-		inputs[indices_replaced] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
+		inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
 	elif tform == 'Replace':
-		indices_random = torch.bernoulli(torch.full(labels.shape, 1.0)).bool() & masked_indices
 		random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
-		inputs[indices_random] = random_words[indices_random]
+		inputs[masked_indices] = random_words[masked_indices]
 	elif tform == 'None':
 		return inputs, labels, masked_indices
 	else:

@@ -14,18 +14,18 @@ classflr=1e-3 # 1e-5 #
 patience=10
 classfdp=0.3
 devWd=0.1
-devlr=1e-3
+devlr=$2 #1e-3
 spconfig='vbasic'
 iters=150
-soptlr=$2 #5e-2
+soptlr=$3 #5e-2
 wfrac=0.06
 basewd=0.01
 devftiters=10
 devbsz=32
-start=$3
-end=$4
+start=$4
+end=$5
 mstep=2
-ext=$5
+ext=$6
 cfwd=0.1
 
 for k in $(seq $start $end)
