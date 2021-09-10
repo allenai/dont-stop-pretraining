@@ -55,7 +55,8 @@ from transformers import (
 )
 
 import sys
-PATH="/home/ldery/projects/AutoAuxiliaryLossCpy/AutoSearchSpace/"
+PATH = os.path.join(os.getcwd(), "AutoSearchSpace/")
+
 sys.path.insert(1, PATH)
 
 from config import add_config_args, Config
@@ -229,7 +230,7 @@ def auto_auxiliary(args):
 										max_seq_len=args.classf_max_seq_len, dropout=args.classifier_dropout,
 										save_path=os.path.join(args.output_dir, 'modelWAuxTasks.pth'),
 										grad_accum_factor=args.gradient_accumulation_steps, batch_sz=args.classf_iter_batchsz,
-										dev_batch_sz=args.dev_batch_sz
+										dev_batch_sz=args.dev_batch_sz, share_output_heads=args.share_output_heads
 					)
 	model.to(args.device)
 	wrapper_model.to(args.device)

@@ -19,7 +19,9 @@ import os
 import sys
 import gc
 import math
-PATH="/home/ldery/projects/AutoAuxiliaryLoss/dont_stop_pretraining/"
+
+PATH = os.path.join(os.getcwd(), "dont_stop_pretraining/")
+
 sys.path.insert(1, PATH)
 from models import BasicClassifierWithF1, BasicSequenceTagger
 from modules.seq2vec_encoders.cls_pooler import CLSPooler
@@ -101,6 +103,7 @@ def add_modelling_options(parser):
 	parser.add_argument("--classf_lr", type=float, default=2e-5, help="Learning rate of classifier")
 	parser.add_argument("--classf_ft_lr", type=float, default=2e-6, help="Learning rate of classifier for finetuning")
 	parser.add_argument("--dev_fit_iters", type=int, default=10, help="Number of iterations to run fitting dev head")
+	parser.add_argument("--share-output-heads", action='store_true')
 	return parser
 
 import pdb
@@ -154,6 +157,7 @@ class ModelWithAuxTasks(AutoModel):
 					batch_sz=8,
 					grad_accum_factor=8,
 					dev_batch_sz=128,
+					share_output_heads=False
 	):
 		assert save_path is not None, 'Invalid Save Path Provided for Classifier Head'
 		assert isinstance(primary_task_info, dict), 'Invalid type of base_task_dataset_files. Expected Dict'
@@ -179,6 +183,7 @@ class ModelWithAuxTasks(AutoModel):
 		# Setting up output heads
 		self.model_name = model_name
 		self.base_model = base_model
+		self.share_output_heads = share_output_heads
 		self.setup_heads(searchOpts, dropout, embedding_dim, num_layers, ff_multiplier)
 		self.batch_sz = batch_sz
 		self.max_norm = 1.0
@@ -254,6 +259,10 @@ class ModelWithAuxTasks(AutoModel):
 		# Setup the other outputs here
 		for aux_loss_config in searchOpts.get_valid_configs():
 			key_ = ".".join([str(x) for x in aux_loss_config])
+			if self.share_output_heads:
+				key_ = str(aux_loss_config[-1])
+				if key_ in self.head_list:
+					continue
 			if searchOpts.is_tokenlevel(aux_loss_config[-1]):
 				# We are doing token level classification here
 				vocab_tokens, is_lm = searchOpts.is_tokenlevel_lm(aux_loss_config[-1])
@@ -549,6 +558,9 @@ class ModelWithAuxTasks(AutoModel):
 		self.tboard_writer.add_scalars('aux.cosines', aux_cosines, step_)
 		self.tboard_writer.add_scalars('aux.losses', losses_, step_)
 		self.tboard_writer.add_scalars('aux.weights', weights_, step_)
+# 		print("This is the current set of weights : \n")
+# 		print(weights_)
+# 		print("\n")
 		self.tboard_writer.add_scalars('aux.raw_weights', raw_weights_, step_)
 		self.tboard_writer.add_scalars('aux.lossxweights', prods_, step_)
 		self.tboard_writer.add_scalars('aux.gradnorms', norms_, step_)
@@ -605,7 +617,7 @@ class ModelWithAuxTasks(AutoModel):
 
 		human_readable = searchOpts.get_config_human_readable(aux_loss_config) if not is_prim else aux_loss_config
 		if not is_prim:
-			task_id = ".".join([str(x) for x in aux_loss_config])
+			task_id = ".".join([str(x) for x in aux_loss_config]) if not self.share_output_heads else str(aux_loss_config[-1])
 		else:
 			task_id = aux_loss_config
 		this_head = getattr(self, "AuxHead-{}".format(task_id), None)

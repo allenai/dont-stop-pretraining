@@ -1,5 +1,14 @@
 from copy import deepcopy
 
+BERT = {
+	'input-space' : ['Task'],
+	'input-tform-space': ['BERT'],
+	'rep-tform-space' : ['None'],
+	'out-token-space' : ['DENOISE'],
+	'out-sent-space': [],
+}
+BERT['out-space'] = [*BERT['out-token-space'], *BERT['out-sent-space']]
+
 
 VBASIC = {
 	'input-space' : ['Task'],
@@ -69,8 +78,8 @@ def get_config(name):
 		config = FULL
 	elif name == 'vbasic':
 		config = VBASIC
-	elif name == 'vbasic1':
-		config = VBASIC1
+	elif name == 'bert':
+		config = BERT
 	assert config is not None, 'Wrong Config name given : {}'.format(name)
 	return config
 

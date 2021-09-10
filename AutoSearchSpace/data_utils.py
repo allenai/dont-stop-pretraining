@@ -2,13 +2,26 @@ import torch
 import unicodedata
 import numpy as np
 from torch.nn.utils.rnn import pad_sequence as torch_pad_sequence
-
+import pdb
 
 def pad_sequence(all_egs, pad_token_id):
 	if pad_token_id is None:
 		return torch_pad_sequence(all_egs, batch_first=True)
 	else:
 		return torch_pad_sequence(all_egs, batch_first=True, padding_value=pad_token_id)
+
+
+def get_probability_matrix(proba, labels, tokenizer):
+	probability_matrix = torch.full(labels.shape, proba)
+	special_tokens_mask = [
+		tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in labels.tolist()
+	]
+	probability_matrix.masked_fill_(torch.tensor(special_tokens_mask, dtype=torch.bool), value=0.0)
+	if tokenizer._pad_token is not None:
+		padding_mask = labels.eq(tokenizer.pad_token_id)
+		probability_matrix.masked_fill_(padding_mask, value=0.0)
+	return probability_matrix
+
 
 def mask_tokens(inputs, tokenizer, proba, tform):
 	""" Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original. """
@@ -19,23 +32,50 @@ def mask_tokens(inputs, tokenizer, proba, tform):
 		)
 	labels = inputs.clone()
 	# We sample a few tokens in each sequence for masked-LM training (with probability args.mlm_probability defaults to 0.15 in Bert/RoBERTa)
-	probability_matrix = torch.full(labels.shape, proba)
-	special_tokens_mask = [
-		tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in labels.tolist()
-	]
-	probability_matrix.masked_fill_(torch.tensor(special_tokens_mask, dtype=torch.bool), value=0.0)
-	if tokenizer._pad_token is not None:
-		padding_mask = labels.eq(tokenizer.pad_token_id)
-		probability_matrix.masked_fill_(padding_mask, value=0.0)
+	probability_matrix = get_probability_matrix(proba, labels, tokenizer)
 	masked_indices = torch.bernoulli(probability_matrix).bool()
 	labels[~masked_indices] = -100	# We only compute loss on masked tokens
+	
+	if tform == 'BERT':
+		# 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
+		indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
+		inputs[indices_replaced] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
 
-	if tform == 'Mask':
+		# 10% of the time, we replace masked input tokens with random word
+		indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).bool() & masked_indices & ~indices_replaced
+		random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
+		inputs[indices_random] = random_words[indices_random]
+
+		# The rest of the time (10% of the time) we keep the masked input tokens unchanged
+		return inputs, labels, masked_indices
+	elif tform == 'Mask':
 		inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
+		# 10% of all corrupted tokens are randomly replaced.
+		random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
+		selected = torch.bernoulli(get_probability_matrix(0.05, labels, tokenizer)).bool()
+		selected = selected ^ (selected & masked_indices)
+		inputs[selected] = random_words[selected]
 	elif tform == 'Replace':
 		random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
 		inputs[masked_indices] = random_words[masked_indices]
+		
+		# 10% of all corrupted tokens are masked replaced.
+		selected = torch.bernoulli(get_probability_matrix(0.05, labels, tokenizer)).bool()
+		selected = selected ^ (selected & masked_indices)
+		inputs[selected] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
 	elif tform == 'None':
+		# 10% of all corrupted tokens are random-word replaced.
+		selected = torch.bernoulli(get_probability_matrix(0.05, labels, tokenizer)).bool()
+		selected = selected ^ (selected & masked_indices)
+		random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
+		inputs[selected] = random_words[selected]
+		
+		# 10% of all corrupted tokens are masked replaced.
+		old_selected = masked_indices | selected
+		selected = torch.bernoulli(get_probability_matrix(0.05, labels, tokenizer)).bool()
+		selected = selected ^ (selected & old_selected)
+		inputs[selected] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
+		
 		return inputs, labels, masked_indices
 	else:
 		raise ValueError('Transform not implemented Yet : {}'.format(tform_type))
