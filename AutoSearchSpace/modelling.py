@@ -616,8 +616,8 @@ class ModelWithAuxTasks(AutoModel):
 			searchOpts, dev_head_grads, dev_norm, is_prim=False
 	):
 		normed_weights, raw_weights = weights
-		aux_weights, prim_weight = normed_weights
-		raw_aux_weights, raw_prim_weight = raw_weights
+		aux_weights, prim_weight, joint_aux_weight = normed_weights
+		raw_aux_weights, raw_prim_weight, raw_joint_aux_weight = raw_weights
 
 		human_readable = searchOpts.get_config_human_readable(aux_loss_config) if not is_prim else aux_loss_config
 		if not is_prim:
@@ -636,14 +636,15 @@ class ModelWithAuxTasks(AutoModel):
 			tformed_masks = batch['tformed_masks']
 			og_order = ['None', 'Replace', 'Mask']
 			full_loss = (model_out['loss_full']).view(output_.shape)
-			total_weight = 0
+
+			joint_aux_grads = torch.autograd.grad(model_out['loss'], this_head.parameters(), allow_unused=True, retain_graph=True)[:self.body_params_end]
+			task_norm = calc_norm(joint_aux_grads) + EPS # adding here to prevent nans from appearing
 			for idx, key_val in enumerate(og_order):
 				this_mask = tformed_masks[key_val]
 				loss_ = full_loss[this_mask].mean()
 
 				gradients = torch.autograd.grad(loss_, this_head.parameters(), allow_unused=True, retain_graph=True)
 				this_grads = gradients[:self.body_params_end]
-				task_norm = calc_norm(this_grads) + EPS # adding here to prevent nans from appearing
 				per_param_dp = []
 				cos_sim = dot_prod(dev_head_grads, this_grads, ppdp=per_param_dp)
 				cos_sim = (cos_sim / (dev_norm * task_norm))
@@ -659,13 +660,13 @@ class ModelWithAuxTasks(AutoModel):
 				self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight, raw_weight))
 				if math.isnan(this_weight):
 					pdb.set_trace()
-				total_weight += this_weight
-			try:
-				assert total_weight < 1.0, 'The total auxiliary task weight should be less than 1'
-			except:
-				print('Hit the assert and now inside a pdb.set_trace issue')
-				pdb.set_trace()
-			updated_loss = (model_out['loss'] * total_weight) / self.grad_accum_factor
+
+			cos_sim = dot_prod(dev_head_grads, joint_aux_grads)
+			cos_sim = (cos_sim / (dev_norm * task_norm))
+			cos_sim = cos_sim / self.grad_accum_factor
+			searchOpts.update_grad(-1, -cos_sim) # Hacky - will fix later
+
+			updated_loss = (model_out['loss'] * joint_aux_weight) / self.grad_accum_factor
 			updated_loss.backward()
 		else:
 			loss_ = model_out['loss']
