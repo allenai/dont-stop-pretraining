@@ -33,7 +33,7 @@ class SearchOptions(object):
 		base_shape = [1 for _ in range(num_stages)]
 		all_dims = list(base_shape)
 		self.stage_order = []
-		prim_task_info = ['Task', 'None', 'None']
+		prim_task_info = ['Task', 'sjfkjdksjkf', 'None'] # Todo [ldery] - removed this so that we can more faithfully replicate bert-like objective
 		self.primary_task_rep = {}
 		for stage_id in range(num_stages):
 			stage_name, ids_ = self.config.get_stage_w_name(stage_id)
@@ -57,7 +57,10 @@ class SearchOptions(object):
 		self.create_mask_for_illegal(all_dims, is_cuda)
 
 		self.prim_weight =  create_tensor((1,), init=int(use_EG), requires_grad=True, is_cuda=is_cuda)
-		self.prim_output_weight = create_tensor((1,), init=int(use_EG), requires_grad=True, is_cuda=is_cuda)
+# 		self.prim_output_weight = create_tensor((1,), init=int(use_EG), requires_grad=True, is_cuda=is_cuda)
+		self.joint_aux_weight = create_tensor((1,), init=int(use_EG), requires_grad=True, is_cuda=is_cuda)
+
+		self.joint_aux_upstream_grad = create_tensor((1,), init=int(use_EG), requires_grad=False, is_cuda=is_cuda)
 		self.config_upstream_grad = create_tensor(all_dims,init=int(use_EG), requires_grad=False, is_cuda=is_cuda)
 		self.prim_upstream_grad = create_tensor((1,), init=int(use_EG), requires_grad=False, is_cuda=is_cuda)
 		self.use_EG = use_EG
@@ -107,41 +110,50 @@ class SearchOptions(object):
 	def get_weighttensor_wgrad(self, softmax=True):
 		this_tensor = sum([self.weights[name] for name in self.stage_order])
 		shape = this_tensor.shape
-		this_prim = self.prim_weight + self.prim_output_weight
-		for k, v in self.weights.items():
-			if k not in self.primary_task_rep:
-				continue
-			assert self.primary_task_rep[k] == 0, 'None should always have the first index for {}'.format(k)
-			this_prim = this_prim + v[0, 0, 0, 0]
+		this_prim = self.prim_weight
+# 		+ self.prim_output_weight
+# 		for k, v in self.weights.items():
+# 			if k not in self.primary_task_rep:
+# 				continue
+# 			assert self.primary_task_rep[k] == 0, 'None should always have the first index for {}'.format(k)
+# 			this_prim = this_prim + v[0, 0, 0, 0]
 
+		# Todo [ldery] - remove when appropriate
+		this_aux = self.joint_aux_weight
+		full_ = torch.cat((this_prim, this_aux))
 		if softmax:
-			full_ = torch.cat((this_tensor.view(-1), this_prim))
 			# Compute Normalization over all entries
 			sm = F.softmax(full_, dim=-1)
-			sm_reshaped = sm[:-1].view(*shape)
-			return sm_reshaped, sm[-1]
+			config_weights = F.softmax(this_tensor.view(-1), dim=-1)
+			config_weights = config_weights.view(*shape)
+			return config_weights, sm[0], sm[1]
 		else:
-			return this_tensor, this_prim
+			return this_tensor, this_prim, this_aux # Todo - ldery - we should remove this later
 
 	# Not the cleanest way to do this but it's ok for now
 	def update_grad(self, config, grad):
 		if isinstance(config, tuple):
 			self.config_upstream_grad[config[0], config[1], config[2], config[3]].add_(grad)
+		elif config == -1: # Todo[ldery]: This is hacky but will clean up later
+			self.joint_aux_upstream_grad.add_(grad)
 		else:
 			self.prim_upstream_grad.add_(grad)
 	
 	def clear_grads(self):
 		self.config_upstream_grad.zero_()
 		self.prim_upstream_grad.zero_()
+		self.joint_aux_upstream_grad.zero_()
 
-	def set_weightensor_grads(self, upstream_grad_tensor, prim_upstream_grad):
-		weight_tensor, prim_weight = self.get_weighttensor_wgrad(softmax=False)
+	def set_weightensor_grads(self, upstream_grad_tensor, prim_upstream_grad, aux_upstream_grad):
+		weight_tensor, prim_weight, aux_weight = self.get_weighttensor_wgrad(softmax=False)
 		proxy_loss = (weight_tensor * upstream_grad_tensor).sum()
 		proxy_loss.backward()
 
 		proxy_loss = (prim_weight * prim_upstream_grad).sum()
 		proxy_loss.backward()
 		
+		proxy_loss = (aux_weight * aux_upstream_grad)
+		proxy_loss.backward()
 	
 	def get_exp_update(self, weight, is_output=False, factor=None):
 		if factor is None:
@@ -159,7 +171,7 @@ class SearchOptions(object):
 
 	def update_weighttensor(self):
 		self.step_counter += 1
-		self.set_weightensor_grads(self.config_upstream_grad, self.prim_upstream_grad)
+		self.set_weightensor_grads(self.config_upstream_grad, self.prim_upstream_grad, self.joint_aux_upstream_grad)
 		if (self.step_counter % self.step_every) == 0:
 			output_norm, all_norm = None, None
 			with torch.no_grad():
@@ -181,11 +193,12 @@ class SearchOptions(object):
 							all_norm = this_weight.sum() if key == 'all' else all_norm
 				# Perform updates on the primary weight
 				assert self.prim_weight.grad is not None, 'Prim Weight should have gradients'
-				assert self.prim_output_weight.grad is not None, 'Prim Output Weight should have gradients'
+# 				assert self.prim_output_weight.grad is not None, 'Prim Output Weight should have gradients'
 				factor = 1.0 / self.step_every
 				if not self.use_EG:
 					self.update_single_weight(self.prim_weight, factor=factor)
-					self.update_single_weight(self.prim_output_weight, is_output=True)
+# 					self.update_single_weight(self.prim_output_weight, is_output=True)
+					self.update_single_weight(self.joint_aux_weight, factor=factor)
 				else:
 					# Update the primary weights
 					this_weight = self.get_exp_update(self.prim_weight, factor=factor)

@@ -193,11 +193,11 @@ class DataTransformAndItr(object):
 
 	def apply_out_tform(
 							self, output_type, ds, padded_sent, tformed_sent,
-							orig_samples, tokenID_samples, special_tok_mask
+							orig_samples, tokenID_samples, special_tok_mask, masks_for_tformed
 						):
 		if output_type == 'DENOISE':
 			assert padded_sent.shape == tformed_sent.shape, 'Invalid Shapes. Input must have same shape as output'
-			return {'input': padded_sent, 'output': tformed_sent}
+			return {'input': padded_sent, 'output': tformed_sent, 'tformed_masks': masks_for_tformed}
 		elif output_type == 'TFIDF':
 			tfidf_sent = [ds.gettfidfs(x['idx'], special_tok_mask[id_]) for id_, x in enumerate(orig_samples)]
 			tfidf_sent = pad_sequence(tfidf_sent, OUT_PAD)
@@ -255,8 +255,8 @@ class DataTransformAndItr(object):
 			special_tok_mask = out["special_tokens_mask"]
 			inputs = pad_sequence(all_egs, self.dataOpts.tokenizer.pad_token_id)
 			# need to do the outputs
-			inputs, labels, _ = self.apply_in_tform(inputs, in_tform)
-			return self.apply_out_tform(out_tform, ds, inputs, labels, examples, all_egs, special_tok_mask)
+			inputs, labels, masks_for_tformed = self.apply_in_tform(inputs, in_tform)
+			return self.apply_out_tform(out_tform, ds, inputs, labels, examples, all_egs, special_tok_mask, masks_for_tformed)
 
 		sampler = RandomSampler(ds) if local_rank == -1 else DistributedSampler(ds)
 		dataloader = DataLoader(
