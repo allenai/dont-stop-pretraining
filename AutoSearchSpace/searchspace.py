@@ -33,7 +33,7 @@ class SearchOptions(object):
 		base_shape = [1 for _ in range(num_stages)]
 		all_dims = list(base_shape)
 		self.stage_order = []
-		prim_task_info = ['Task', 'None', 'None']
+		prim_task_info = ['Task', 'sjfkjdksjkf', 'None'] # Todo [ldery] - removed this so that we can more faithfully replicate bert-like objective
 		self.primary_task_rep = {}
 		for stage_id in range(num_stages):
 			stage_name, ids_ = self.config.get_stage_w_name(stage_id)
@@ -114,14 +114,19 @@ class SearchOptions(object):
 			assert self.primary_task_rep[k] == 0, 'None should always have the first index for {}'.format(k)
 			this_prim = this_prim + v[0, 0, 0, 0]
 
+		# Todo [ldery] - remove when appropriate
+		full_ = torch.cat((this_tensor.view(-1), this_prim))
+		bias = torch.zeros_like(full_)
+		bias[-1] = np.log(full_.shape[0] - 1) # This should cause us to start from 0.5 weight given the primary task
+		temperature = 0.1
+		full_ = (full_ + (bias * temperature)) / temperature
 		if softmax:
-			full_ = torch.cat((this_tensor.view(-1), this_prim))
 			# Compute Normalization over all entries
 			sm = F.softmax(full_, dim=-1)
 			sm_reshaped = sm[:-1].view(*shape)
 			return sm_reshaped, sm[-1]
 		else:
-			return this_tensor, this_prim
+			return this_tensor, (this_prim + np.log(full_.shape[0] - 1)) # Todo - ldery - we should remove this later
 
 	# Not the cleanest way to do this but it's ok for now
 	def update_grad(self, config, grad):

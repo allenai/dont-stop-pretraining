@@ -32,6 +32,8 @@ try:
 except ImportError:
 	from tensorboardX import SummaryWriter
 
+EPS = 1e-8
+
 # Calculates the dot products of 2 gradient vectors
 def dot_prod(g1, g2, ppdp=None):
 	total = 0.0
@@ -587,10 +589,12 @@ class ModelWithAuxTasks(AutoModel):
 		normed_weights = searchOpts.get_weighttensor_nograd()
 		raw_weights = searchOpts.get_weighttensor_nograd(softmax=False)
 
+		seen_aux = False
 		for aux_loss_config in key_order:
 			batch = aux_config_w_batch[aux_loss_config]
 			is_prim = not isinstance(aux_loss_config, tuple)
 			try:
+				# Currently we will execute this only once. Will need to clean this up to make it neater
 				self.run_one_auxconfig(
 										aux_loss_config, batch, (normed_weights, raw_weights),
 										searchOpts, dev_head_grads, dev_norm, is_prim=is_prim
@@ -626,29 +630,62 @@ class ModelWithAuxTasks(AutoModel):
 			if isinstance(v, torch.Tensor):
 				batch[k] = v.cuda()
 		input_, output_, rep_mask = batch['input'], batch['output'], batch['rep_mask']
-		loss_ = this_head(input_, output_, attn_mask=rep_mask)['loss']
-		gradients = torch.autograd.grad(loss_, this_head.parameters(), allow_unused=True, retain_graph=True)
-
-		this_grads = gradients[:self.body_params_end]
-		task_norm = calc_norm(this_grads)
-		per_param_dp = []
-		cos_sim = dot_prod(dev_head_grads, this_grads, ppdp=per_param_dp)
-		cos_sim = (cos_sim / (dev_norm * task_norm)) 
-		self.weight_stats[human_readable].append((dev_norm.item(), task_norm.item(), cos_sim))
-		cos_sim = cos_sim / self.grad_accum_factor
-		self.per_param_dp[human_readable].append(per_param_dp)
-		searchOpts.update_grad(aux_loss_config, -cos_sim)
-		# Add this to the model gradients
+		model_out = this_head(input_, output_, attn_mask=rep_mask)
+		# Note - this is hacky but we want to do the bare minimum to see if we can alleviate the problem before moving on
 		if not is_prim:
-			this_weight = aux_weights[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
-			raw_weight = raw_aux_weights[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
+			tformed_masks = batch['tformed_masks']
+			og_order = ['None', 'Replace', 'Mask']
+			full_loss = (model_out['loss_full']).view(output_.shape)
+			total_weight = 0
+			for idx, key_val in enumerate(og_order):
+				this_mask = tformed_masks[key_val]
+				loss_ = full_loss[this_mask].mean()
+
+				gradients = torch.autograd.grad(loss_, this_head.parameters(), allow_unused=True, retain_graph=True)
+				this_grads = gradients[:self.body_params_end]
+				task_norm = calc_norm(this_grads) + EPS # adding here to prevent nans from appearing
+				per_param_dp = []
+				cos_sim = dot_prod(dev_head_grads, this_grads, ppdp=per_param_dp)
+				cos_sim = (cos_sim / (dev_norm * task_norm))
+				this_loss_config = (aux_loss_config[0], idx, aux_loss_config[2], aux_loss_config[3])
+				human_readable =  searchOpts.get_config_human_readable(this_loss_config)
+				self.weight_stats[human_readable].append((dev_norm.item(), task_norm.item(), cos_sim))
+				cos_sim = cos_sim / self.grad_accum_factor
+				self.per_param_dp[human_readable].append(per_param_dp)
+				searchOpts.update_grad(this_loss_config, -cos_sim)
+
+				this_weight = aux_weights[aux_loss_config[0], idx, aux_loss_config[2], aux_loss_config[3]].item()
+				raw_weight = raw_aux_weights[aux_loss_config[0], idx, aux_loss_config[2], aux_loss_config[3]].item()
+				self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight, raw_weight))
+				if math.isnan(this_weight):
+					pdb.set_trace()
+				total_weight += this_weight
+			try:
+				assert total_weight < 1.0, 'The total auxiliary task weight should be less than 1'
+			except:
+				print('Hit the assert and now inside a pdb.set_trace issue')
+				pdb.set_trace()
+			updated_loss = (model_out['loss'] * total_weight) / self.grad_accum_factor
+			updated_loss.backward()
 		else:
+			loss_ = model_out['loss']
+			gradients = torch.autograd.grad(loss_, this_head.parameters(), allow_unused=True, retain_graph=True)
+			this_grads = gradients[:self.body_params_end]
+			task_norm = calc_norm(this_grads) + EPS
+			per_param_dp = []
+			cos_sim = dot_prod(dev_head_grads, this_grads, ppdp=per_param_dp)
+			cos_sim = (cos_sim / (dev_norm * task_norm)) 
+			self.weight_stats[human_readable].append((dev_norm.item(), task_norm.item(), cos_sim))
+			cos_sim = cos_sim / self.grad_accum_factor
+			self.per_param_dp[human_readable].append(per_param_dp)
+			searchOpts.update_grad(aux_loss_config, -cos_sim)
+			# Add this to the model gradients
 			this_weight = prim_weight.item()
 			raw_weight = raw_prim_weight.item()
 
-		weighted_loss = (loss_ * this_weight) / self.grad_accum_factor
-		weighted_loss.backward()
-		self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight, raw_weight))
+			weighted_loss = (loss_ * this_weight) / self.grad_accum_factor
+			weighted_loss.backward()
+			self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight, raw_weight))
 
 
 	# We train the primary head. This is further finetuning on top pre-training
