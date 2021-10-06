@@ -539,6 +539,19 @@ class ModelWithAuxTasks(AutoModel):
 
 		aux_cosines, losses_, weights_, prods_  = {}, {}, {}, {}
 		norms_, raw_weights_ = {}, {}
+
+		def update_iterates_for_key(k):
+			v_l = self.config_losses_and_weights[k]
+			values = [x[0] for x in v_l[-self.grad_accum_factor:]]
+			losses_[k] = np.mean(values)
+
+			values = [x[1] for x in v_l[-self.grad_accum_factor:]]
+			weights_[k] = np.mean(values)
+			prods_[k] = weights_[k] * losses_[k]
+
+			values = [x[-1] for x in v_l[-self.grad_accum_factor:]]
+			raw_weights_[k] = np.mean(values)
+
 		for k, v in self.weight_stats.items():
 			values = [x[-1] for x in v[-self.grad_accum_factor:]]
 			aux_cosines[k] = np.mean(values)
@@ -546,17 +559,9 @@ class ModelWithAuxTasks(AutoModel):
 			values = [x[1] for x in v[-self.grad_accum_factor:]]
 			norms_[k] = np.mean(values)
 
-			v_l = self.config_losses_and_weights[k]
-			values = [x[0] for x in v_l[-self.grad_accum_factor:]]
-			losses_[k] = np.mean(values)
-			
-			values = [x[1] for x in v_l[-self.grad_accum_factor:]]
-			weights_[k] = np.mean(values)
-			prods_[k] = weights_[k] * losses_[k]
-			
-			values = [x[-1] for x in v_l[-self.grad_accum_factor:]]
-			raw_weights_[k] = np.mean(values)
+			update_iterates_for_key(k)
 
+		update_iterates_for_key('Auxiliary')
 		self.tboard_writer.add_scalars('aux.cosines', aux_cosines, step_)
 		self.tboard_writer.add_scalars('aux.losses', losses_, step_)
 		self.tboard_writer.add_scalars('aux.weights', weights_, step_)
@@ -616,8 +621,8 @@ class ModelWithAuxTasks(AutoModel):
 			searchOpts, dev_head_grads, dev_norm, is_prim=False
 	):
 		normed_weights, raw_weights = weights
-		aux_weights, prim_weight, joint_aux_weight = normed_weights
-		raw_aux_weights, raw_prim_weight, raw_joint_aux_weight = raw_weights
+		aux_weights, prim_weight = normed_weights
+		raw_aux_weights, raw_prim_weight = raw_weights
 
 		human_readable = searchOpts.get_config_human_readable(aux_loss_config) if not is_prim else aux_loss_config
 		if not is_prim:
@@ -639,6 +644,7 @@ class ModelWithAuxTasks(AutoModel):
 
 			joint_aux_grads = torch.autograd.grad(model_out['loss'], this_head.parameters(), allow_unused=True, retain_graph=True)[:self.body_params_end]
 			task_norm = calc_norm(joint_aux_grads) + EPS # adding here to prevent nans from appearing
+			joint_aux_weight = (1.0 - prim_weight)
 			for idx, key_val in enumerate(og_order):
 				this_mask = tformed_masks[key_val]
 				loss_ = full_loss[this_mask].mean()
@@ -653,20 +659,17 @@ class ModelWithAuxTasks(AutoModel):
 				self.weight_stats[human_readable].append((dev_norm.item(), task_norm.item(), cos_sim))
 				cos_sim = cos_sim / self.grad_accum_factor
 				self.per_param_dp[human_readable].append(per_param_dp)
-				searchOpts.update_grad(this_loss_config, -cos_sim)
+				searchOpts.update_grad(this_loss_config, -cos_sim * joint_aux_weight)
 
 				this_weight = aux_weights[aux_loss_config[0], idx, aux_loss_config[2], aux_loss_config[3]].item()
 				raw_weight = raw_aux_weights[aux_loss_config[0], idx, aux_loss_config[2], aux_loss_config[3]].item()
 				self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight, raw_weight))
 				if math.isnan(this_weight):
-					pdb.set_trace()
-
-			cos_sim = dot_prod(dev_head_grads, joint_aux_grads)
-			cos_sim = (cos_sim / (dev_norm * task_norm))
-			cos_sim = cos_sim / self.grad_accum_factor
-			searchOpts.update_grad(-1, -cos_sim) # Hacky - will fix later
+					print('Exiting because we encountered a NAN')
+					exit()
 
 			updated_loss = (model_out['loss'] * joint_aux_weight) / self.grad_accum_factor
+			self.config_losses_and_weights['Auxiliary'].append((model_out['loss'].item(), joint_aux_weight.item(), raw_aux_weights.view(-1).mean().item()))
 			updated_loss.backward()
 		else:
 			loss_ = model_out['loss']
