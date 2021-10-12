@@ -177,21 +177,12 @@ def auto_auxiliary(args):
 	# Create the search options object
 	searchOpts = SearchOptions(
 									autoloss_config, args.searchopt_lr, use_EG=args.use_EG, step_every=args.step_meta_every,
-									use_factored_model=args.use_factored_model, is_cuda=True
+									use_factored_model=args.use_factored_model, is_cuda=True, token_temp=args.token_temp
 								)
 
 	# enumerate the valid loss configs and get iterators for each loss type
-	data_iterators = {}
-	max_dataset_len = -1
-	for aux_loss_config in searchOpts.get_valid_configs():
-		data_iterators[aux_loss_config] = dtform_and_itr.get_iterator(aux_loss_config)
-		dataset_len = len(data_iterators[aux_loss_config])
-		max_dataset_len = max(max_dataset_len, dataset_len)
-
-	
+	max_dataset_len = dtform_and_itr.total_iters()
 	representation_tform = RepTransform(autoloss_config.get_stage(2))
-
-	# Todo [ldery] - need to figure out what to do in the case of distributed training
 
 	# Instantiate the model
 	if args.config_name:
@@ -244,6 +235,7 @@ def auto_auxiliary(args):
 		t_total = max_dataset_len // args.gradient_accumulation_steps * args.num_train_epochs
 
 	no_decay = ["bias", "LayerNorm.weight"]
+	args.weight_decay = args.base_wd
 	optimizer_grouped_parameters = [
 		{
 			"params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
@@ -333,21 +325,7 @@ def auto_auxiliary(args):
 
 			# Sample a subset of the valid configurations
 			sample_configs = searchOpts.sample_configurations(args.num_config_samples)
-			aggregate_data = {}
-			for config_ in sample_configs:
-				# Get the iterator
-				iterator = data_iterators[config_]
-				try:
-					# Get data from iterator
-					batch_ = next(iterator)
-				except:
-					# Need to re-set the iterator
-					data_iterators[config_] = dtform_and_itr.get_iterator(config_)
-					batch_ = next(data_iterators[config_])
-				# Get the padding mask
-				pad_mask = 1.0 - ((batch_['input']).eq(tokenizer.pad_token_id)).float()
-				batch_['rep_mask'] = representation_tform.get_rep_tform(batch_['input'].shape, pad_mask,config_[2])
-				aggregate_data[config_] = batch_
+			aggregate_data = dtform_and_itr.get_data(sample_configs, searchOpts, representation_tform)
 
 			# This does an automatic filling of the gradients. Accumulates the gradients
 			wrapper_model.get_grads_with_auxiliaries(aggregate_data, searchOpts)

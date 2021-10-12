@@ -10,6 +10,7 @@ def add_searchspace_args(parser):
 	parser.add_argument('-use-factored-model', action='store_true')
 	parser.add_argument('-step-meta-every', type=int, default=1)
 	parser.add_argument('-use-EG', action='store_true')
+	parser.add_argument('-token_temp', type=float, default=1.0)
 
 
 def create_tensor(shape, init=0.0, requires_grad=True, is_cuda=True):
@@ -22,7 +23,10 @@ def create_tensor(shape, init=0.0, requires_grad=True, is_cuda=True):
 
 import pdb
 class SearchOptions(object):
-	def __init__(self, config, weight_lr, use_EG= False, step_every=1, use_factored_model=True, is_cuda=True):
+	def __init__(
+					self, config, weight_lr, use_EG= False, step_every=1,
+					use_factored_model=True, is_cuda=True, token_temp=1.0
+				):
 		self.config = config  # Store in case
 		self.weight_lr = weight_lr
 		self.weights = {}
@@ -57,16 +61,33 @@ class SearchOptions(object):
 		self.create_mask_for_illegal(all_dims, is_cuda)
 
 		self.prim_weight =  create_tensor((1,), init=int(use_EG), requires_grad=True, is_cuda=is_cuda)
-		self.prim_output_weight = create_tensor((1,), init=int(use_EG), requires_grad=True, is_cuda=is_cuda)
+		self.aux_weight = create_tensor((1,), init=int(use_EG), requires_grad=True, is_cuda=is_cuda)
 
 		self.config_upstream_grad = create_tensor(all_dims,init=int(use_EG), requires_grad=False, is_cuda=is_cuda)
 		self.prim_upstream_grad = create_tensor((1,), init=int(use_EG), requires_grad=False, is_cuda=is_cuda)
+		self.aux_upstream_grad = create_tensor((1,), init=int(use_EG), requires_grad=False, is_cuda=is_cuda)
+
 		self.use_EG = use_EG
+		self.tau = token_temp
 
 
 	def get_valid_configs(self):
 		return self.valid_configurations
-	
+
+	def get_relative_probas(self, stage_id, stage_members):
+		stage_name, _ = self.config.get_stage_w_name(stage_id)
+		with torch.no_grad():
+			this_weights = (self.weights[stage_name]).squeeze()
+			if this_weights.numel() == 1:
+				this_weights = this_weights.unsqueeze(0)
+			values = np.array([this_weights[id_] for id_ in stage_members])
+			if stage_id == 1:
+				# We want to add ['None', 'Replace', 'Mask']
+				bias = np.array([0, 0, 2.0794]) * self.tau
+				values = (values + bias) / self.tau
+			probas = F.softmax(torch.tensor(list(values)), dim=-1)
+		return probas
+
 	def get_config_human_readable(self, config):
 		name_ = ''
 		for stage_id in range(len(config)):
@@ -104,45 +125,43 @@ class SearchOptions(object):
 		with torch.no_grad():
 			return self.get_weighttensor_wgrad(softmax=softmax)
 
-	# Todo [ldery] - need to test this effectively
 	def get_weighttensor_wgrad(self, softmax=True):
-		this_tensor = sum([self.weights[name] for name in self.stage_order])
-		shape = this_tensor.shape
-		this_prim = self.prim_weight + self.prim_output_weight
-		for k, v in self.weights.items():
-			if k not in self.primary_task_rep:
-				continue
-			assert self.primary_task_rep[k] == 0, 'None should always have the first index for {}'.format(k)
-			this_prim = this_prim + v[0, 0, 0, 0]
+		aux_config_tensor = sum([self.weights[name] for name in self.stage_order])
 
-		# Todo [ldery] - remove when appropriate
-		full_ = torch.cat((this_prim, torch.mean(this_tensor.view(-1), dim=0, keepdim=True)))
+		full_ = torch.cat((self.prim_weight, self.aux_weight))
 		if softmax:
 			# Compute Normalization over all entries
 			sm = F.softmax(full_, dim=-1)
-			config_weights = F.softmax(this_tensor.view(-1), dim=-1)
+			shape = aux_config_tensor.shape
+			config_weights = F.softmax(aux_config_tensor.view(-1), dim=-1)
 			config_weights = config_weights.view(*shape)
-			return config_weights, sm[0]
+			return config_weights, sm[0], sm[1]
 		else:
-			return this_tensor, this_prim
+			return aux_config_tensor, self.prim_weight, self.aux_weight
 
 	# Not the cleanest way to do this but it's ok for now
 	def update_grad(self, config, grad):
 		if isinstance(config, tuple):
 			self.config_upstream_grad[config[0], config[1], config[2], config[3]].add_(grad)
+		elif config == 'auxiliary':
+			self.aux_upstream_grad.add_(grad)
 		else:
 			self.prim_upstream_grad.add_(grad)
 	
 	def clear_grads(self):
 		self.config_upstream_grad.zero_()
 		self.prim_upstream_grad.zero_()
+		self.aux_upstream_grad.zero_()
 
-	def set_weightensor_grads(self, upstream_grad_tensor, prim_upstream_grad):
-		weight_tensor, prim_weight = self.get_weighttensor_wgrad(softmax=False)
+	def set_weightensor_grads(self, upstream_grad_tensor, prim_upstream_grad, aux_upstream_grad):
+		weight_tensor, prim_weight, aux_weight = self.get_weighttensor_wgrad(softmax=False)
 		proxy_loss = (weight_tensor * upstream_grad_tensor).sum()
 		proxy_loss.backward()
 
 		proxy_loss = (prim_weight * prim_upstream_grad).sum()
+		proxy_loss.backward()
+		
+		proxy_loss = (aux_weight * aux_upstream_grad).sum()
 		proxy_loss.backward()
 
 
@@ -152,17 +171,15 @@ class SearchOptions(object):
 			factor = ((weight.numel() + int(is_output)) / num_params) / self.step_every
 		return weight * torch.exp(-self.weight_lr * weight.grad * factor)
 
-	def update_single_weight(self, weight, is_output=False, factor=None):
-		if factor is None:
-			num_params = self.weights['all'].numel()
-			factor = ((weight.numel() + int(is_output)) / num_params) / self.step_every
+	def update_weight(self, weight):
+		factor = 1.0 / self.step_every
 		new_weight = weight - (self.weight_lr * weight.grad * factor)
 		weight.copy_(new_weight)
 		weight.grad.zero_()
 
 	def update_weighttensor(self):
 		self.step_counter += 1
-		self.set_weightensor_grads(self.config_upstream_grad, self.prim_upstream_grad)
+		self.set_weightensor_grads(self.config_upstream_grad, self.prim_upstream_grad, self.aux_upstream_grad)
 		if (self.step_counter % self.step_every) == 0:
 			output_norm, all_norm = None, None
 			with torch.no_grad():
@@ -171,42 +188,12 @@ class SearchOptions(object):
 						continue
 					if weight.grad is None:
 						weight.grad = torch.zeros_like(weight)
-					if not self.use_EG:
-						self.update_single_weight(weight, is_output=(key == 'O')) # poor design but for now being lazy
-					else:
-						this_weight = self.get_exp_update(weight, is_output=(key == 'O'))
-						weight.copy_(this_weight)
-						if (key != 'O') and (key != 'all'): # poor design but for now being lazy
-							weight.div_(this_weight.sum())
-							weight.grad.zero_()
-						else:
-							output_norm = this_weight.sum() if key == 'O' else output_norm
-							all_norm = this_weight.sum() if key == 'all' else all_norm
+					self.update_weight(weight)
+
 				# Perform updates on the primary weight
 				assert self.prim_weight.grad is not None, 'Prim Weight should have gradients'
-# 				assert self.prim_output_weight.grad is not None, 'Prim Output Weight should have gradients'
-				factor = 1.0 / self.step_every
-				if not self.use_EG:
-					self.update_single_weight(self.prim_weight, factor=factor)
-					self.update_single_weight(self.prim_output_weight, is_output=True)
-				else:
-					# Update the primary weights
-					this_weight = self.get_exp_update(self.prim_weight, factor=factor)
-					self.prim_weight.copy_(this_weight)
-					normalizer = self.prim_weight + all_norm
-					self.prim_weight.div_(normalizer)
-					self.weights['all'].div_(normalizer)
-					self.prim_weight.grad.zero_()
-					self.weights['all'].grad.zero_()
-					
-					# Update primary output weights
-					this_weight = self.get_exp_update(self.prim_output_weight, is_output=True)
-					self.prim_output_weight.copy_(this_weight)
-					normalizer = self.prim_output_weight + output_norm
-					self.prim_output_weight.div_(normalizer)
-					self.weights['O'].div_(normalizer)
-					self.prim_output_weight.grad.zero_()
-					self.weights['O'].grad.zero_()
+				self.update_weight(self.prim_weight)
+				self.update_weight(self.aux_weight)
 
 		self.clear_grads()
 

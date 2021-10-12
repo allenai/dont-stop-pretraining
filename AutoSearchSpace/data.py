@@ -6,6 +6,7 @@ import unicodedata
 import numpy as np
 from collections import Counter, defaultdict
 from data_utils import *
+import math
 
 from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
 logger = logging.getLogger(__name__)
@@ -102,6 +103,10 @@ class LineByLineRawTextDataset(Dataset):
 	def __getitem__(self, i):
 		return {'sample': self.examples[i], 'idx': i}
 
+	def get_samples(self, n_samples):
+		chosen_idxs = np.random.choice(len(self.examples), n_samples)
+		return [self[idx] for idx in chosen_idxs]
+
 	def getdocid(self, sent_idx):
 		idx = np.searchsorted(self.doc_lens, sent_idx, side="left")
 		if self.doc_lens[idx] > sent_idx:
@@ -173,7 +178,11 @@ class DataOptions(object):
 
 	def get_dataset(self, id_):
 		return self.id_to_dataset_dict[id_]
-	
+
+	def get_total_len(self):
+		lens = [len(ds) for id_, ds in self.id_to_dataset_dict.items()]
+		return sum(lens)
+
 	def get_dataset_len(self, id_):
 		return len(self.id_to_dataset_dict[id_])
 
@@ -188,16 +197,19 @@ class DataTransformAndItr(object):
 		self.proba = args.mlm_probability
 		self.block_size = args.block_size
 
-	def apply_in_tform(self, sent, in_tform_type):
-		return mask_tokens(sent, self.dataOpts.tokenizer, self.proba, in_tform_type)
+	def total_iters(self):
+		return int(self.dataOpts.get_total_len() / self.train_batch_size)
+
+	def apply_in_tform(self, sent, token_probas=None):
+		return mask_tokens(sent, self.dataOpts.tokenizer, self.proba, token_probas)
 
 	def apply_out_tform(
 							self, output_type, ds, padded_sent, tformed_sent,
-							orig_samples, tokenID_samples, special_tok_mask, masks_for_tformed
+							orig_samples, tokenID_samples, special_tok_mask
 						):
 		if output_type == 'DENOISE':
 			assert padded_sent.shape == tformed_sent.shape, 'Invalid Shapes. Input must have same shape as output'
-			return {'input': padded_sent, 'output': tformed_sent, 'tformed_masks': masks_for_tformed}
+			return {'input': padded_sent, 'output': tformed_sent}
 		elif output_type == 'TFIDF':
 			tfidf_sent = [ds.gettfidfs(x['idx'], special_tok_mask[id_]) for id_, x in enumerate(orig_samples)]
 			tfidf_sent = pad_sequence(tfidf_sent, OUT_PAD)
@@ -237,32 +249,54 @@ class DataTransformAndItr(object):
 		else:
 			raise ValueError('Illegal value for output transform : {}'.format(self.output_type))
 
-	def get_iterator(self, loss_config, shuffle=True, local_rank=-1):
-		ds_id = loss_config[0] # The first stage in the loss config is the dataset-id
-		# Dataset Obtained
-		ds = self.dataOpts.get_dataset(ds_id)
-		in_tform = self.input_tform_dict[loss_config[1]]
-		out_tform = self.output_dict[loss_config[-1]]
-		def collate(examples):
-			all_egs = [x['sample'] for x in examples]
-			# Need to be careful because encode_plus adds special tokens
-			# Todo [ldery] Need to reconsider whether doing this here makes things super slow
-			out = self.dataOpts.tokenizer.batch_encode_plus(
-									all_egs, add_special_tokens=True, truncation=True,
-									max_length=self.block_size, return_special_tokens_mask=True
-					)
-			all_egs = [torch.tensor(x) for x in out["input_ids"]]
-			special_tok_mask = out["special_tokens_mask"]
-			inputs = pad_sequence(all_egs, self.dataOpts.tokenizer.pad_token_id)
-			# need to do the outputs
-			inputs, labels, masks_for_tformed = self.apply_in_tform(inputs, in_tform)
-			return self.apply_out_tform(out_tform, ds, inputs, labels, examples, all_egs, special_tok_mask, masks_for_tformed)
+	def get_data(self, sample_configs, searchOpts, representation_tform):
+		aggregated_data = []
+		# compute dataset marginals
+		rep_tforms = np.unique([config[2] for config in sample_configs])
+		rep_probas = searchOpts.get_relative_probas(2, rep_tforms)
+		for rep_idx, rep_id in enumerate(rep_tforms):
+			num_samples = math.ceil(self.train_batch_size * rep_probas[rep_idx].item())
 
-		sampler = RandomSampler(ds) if local_rank == -1 else DistributedSampler(ds)
-		dataloader = DataLoader(
-			ds, sampler=sampler, batch_size=self.train_batch_size, collate_fn=collate
-		)
-		return iter(dataloader)
+			this_configs = [config for config in sample_configs if config[2] == rep_id]
+			datasets = np.unique([config[0] for config in this_configs])
+			ds_probas = searchOpts.get_relative_probas(0, datasets)
+			for ds_idx, ds_id in enumerate(datasets):
+				n_ds_samples = math.ceil(num_samples * ds_probas[ds_idx].item())
+				ds = self.dataOpts.get_dataset(ds_idx)
+				examples = ds.get_samples(n_ds_samples)
+
+				this_ds_configs = [config for config in this_configs if config[0] == ds_id]
+				token_tforms = np.unique([config[1] for config in this_ds_configs])
+				probas = searchOpts.get_relative_probas(1, token_tforms)
+				_, stage_map = searchOpts.config.get_stage_w_name(1)
+				token_probas = {}
+				for idx, name in stage_map.items():
+					token_probas[name] = probas[idx].item()
+				inputs, labels, masks_for_tformed = self.collate(examples, token_probas)
+				pad_mask = 1.0 - (inputs.eq(self.dataOpts.tokenizer.pad_token_id)).float()
+				rep_mask = representation_tform.get_rep_tform(inputs.shape, pad_mask, rep_id)
+				# Todo [once we implement TFID style loss - include self.apply_out_tform]
+				batch = {'input': inputs, 'output': None, 'rep_mask': rep_mask}
+				config_dict = {}
+				for config_ in this_ds_configs:
+					token_tform_name = stage_map[config_[1]]
+					task_output = masks_for_tformed[token_tform_name][1]
+					config_dict[config_] = task_output
+				aggregated_data.append((batch, config_dict))
+			# Avoiding pre-mature optimization here by aggregating by representation
+		return aggregated_data
+
+	def collate(self, examples, token_probas):
+		all_egs = [x['sample'] for x in examples]
+		out = self.dataOpts.tokenizer.batch_encode_plus(
+								all_egs, add_special_tokens=True, truncation=True,
+								max_length=self.block_size, return_special_tokens_mask=True
+				)
+		all_egs = [torch.tensor(x) for x in out["input_ids"]]
+		special_tok_mask = out["special_tokens_mask"]
+		inputs = pad_sequence(all_egs, self.dataOpts.tokenizer.pad_token_id)
+
+		return  self.apply_in_tform(inputs, token_probas)
 
 
 # Todo  [ldery] - run some tests to make sure code here is working

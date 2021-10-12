@@ -23,7 +23,7 @@ def get_probability_matrix(proba, labels, tokenizer):
 	return probability_matrix
 
 
-def mask_tokens(inputs, tokenizer, proba, tform):
+def mask_tokens(inputs, tokenizer, proba, token_proba=None):
 	""" Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original. """
 
 	if tokenizer.mask_token is None:
@@ -37,68 +37,31 @@ def mask_tokens(inputs, tokenizer, proba, tform):
 	labels[~masked_indices] = -100	# We only compute loss on masked tokens
 
 	tformed_mask_indices = {}
-	# 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
-	indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
+	# x% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
+	mask_proba = 0.8 if token_proba is None else token_proba['Mask']
+	indices_replaced = torch.bernoulli(torch.full(labels.shape, mask_proba)).bool() & masked_indices
 	inputs[indices_replaced] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
-	tformed_mask_indices['Mask'] = indices_replaced
+	
+	mask_output = labels.clone().detach()
+	mask_output[~indices_replaced] = -100
+	tformed_mask_indices['Mask'] = (indices_replaced, mask_output)
 
-	# 10% of the time, we replace masked input tokens with random word
-	indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).bool() & masked_indices & ~indices_replaced
+	# y% of the time, we replace masked input tokens with random word
+	replace_proba = 0.5 if token_proba is None else (token_proba['Replace'] / (token_proba['Replace'] + token_proba['None']))
+	indices_random = torch.bernoulli(torch.full(labels.shape, replace_proba)).bool() & masked_indices & ~indices_replaced
 	random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
 	inputs[indices_random] = random_words[indices_random]
-	tformed_mask_indices['Replace'] = indices_random
-	
-	tformed_mask_indices['None'] = masked_indices & ~(indices_replaced | indices_random)
-	tformed_mask_indices['BERT'] = masked_indices
 
-	# The rest of the time (10% of the time) we keep the masked input tokens unchanged
+	replace_output = labels.clone().detach()
+	replace_output[~indices_random] = -100
+	tformed_mask_indices['Replace'] = (indices_random, replace_output)
+
+	indices_none = masked_indices & ~(indices_replaced | indices_random)
+	none_output = labels.clone().detach()
+	none_output[~indices_none] = -100
+	tformed_mask_indices['None'] = (indices_none, none_output)
 	return inputs, labels, tformed_mask_indices
-	
-# 	if tform == 'BERT':
-# 		# 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
-# 		indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
-# 		inputs[indices_replaced] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
 
-# 		# 10% of the time, we replace masked input tokens with random word
-# 		indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).bool() & masked_indices & ~indices_replaced
-# 		random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
-# 		inputs[indices_random] = random_words[indices_random]
-
-# 		# The rest of the time (10% of the time) we keep the masked input tokens unchanged
-# 		return inputs, labels, masked_indices
-# 	elif tform == 'Mask':
-# 		inputs[masked_indices] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
-# 		# 10% of all corrupted tokens are randomly replaced.
-# 		random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
-# 		selected = torch.bernoulli(get_probability_matrix(0.05, labels, tokenizer)).bool()
-# 		selected = selected ^ (selected & masked_indices)
-# 		inputs[selected] = random_words[selected]
-# 	elif tform == 'Replace':
-# 		random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
-# 		inputs[masked_indices] = random_words[masked_indices]
-		
-# 		# 10% of all corrupted tokens are masked replaced.
-# 		selected = torch.bernoulli(get_probability_matrix(0.05, labels, tokenizer)).bool()
-# 		selected = selected ^ (selected & masked_indices)
-# 		inputs[selected] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
-# 	elif tform == 'None':
-# 		# 10% of all corrupted tokens are random-word replaced.
-# 		selected = torch.bernoulli(get_probability_matrix(0.05, labels, tokenizer)).bool()
-# 		selected = selected ^ (selected & masked_indices)
-# 		random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
-# 		inputs[selected] = random_words[selected]
-		
-# 		# 10% of all corrupted tokens are masked replaced.
-# 		old_selected = masked_indices | selected
-# 		selected = torch.bernoulli(get_probability_matrix(0.05, labels, tokenizer)).bool()
-# 		selected = selected ^ (selected & old_selected)
-# 		inputs[selected] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
-		
-# 		return inputs, labels, masked_indices
-# 	else:
-# 		raise ValueError('Transform not implemented Yet : {}'.format(tform_type))
-
-	return inputs, labels, masked_indices
 
 
 # code burrowed from : 

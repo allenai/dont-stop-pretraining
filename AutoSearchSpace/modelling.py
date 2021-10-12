@@ -125,9 +125,9 @@ class ModelWithLMHead(nn.Module):
 				self_head_params[k].copy_(v)
 				assert self_head_params[k].mean().item() == v.mean().item()
 
-
-	def forward(self, tokens, labels, attn_mask=None):
-		embedded_text = self._text_field_embedder(tokens, attention_mask=attn_mask)
+	def forward(self, tokens, labels, embedded_text=None, attn_mask=None):
+		if embedded_text is None:
+			embedded_text = self._text_field_embedder(tokens, attention_mask=attn_mask)
 		if isinstance(tokens, dict):
 			mask = get_text_field_mask(tokens).float()
 		else:
@@ -205,6 +205,7 @@ class ModelWithAuxTasks(AutoModel):
 		self.per_param_dp = defaultdict(list)
 		self.weight_stats = defaultdict(list)
 		self.config_losses_and_weights = defaultdict(list)
+		self.token_probas = defaultdict(list)
 
 
 	def setup_datasets(self, dataset_split_dict, model_name, max_seq_len, label_vocab=None, lazy=False):
@@ -486,7 +487,6 @@ class ModelWithAuxTasks(AutoModel):
 		assert dev_optim is not None, 'The optimizer for the dev head has not been instantiated'
 
 		# perform gradient descent to get the dev-head
-		# Todo [ldery] - restore this to 'dev' if it turns out this is not the issue
 		samples = self.get_classifier_samples(self.datasets['train'], self.dev_batch_sz)
 		prev_loss_, tol = 1e10, 1e-3
 		all_metrics = [[], [], []]
@@ -561,22 +561,23 @@ class ModelWithAuxTasks(AutoModel):
 
 			update_iterates_for_key(k)
 
-		update_iterates_for_key('Auxiliary')
+		update_iterates_for_key('auxiliary')
 		self.tboard_writer.add_scalars('aux.cosines', aux_cosines, step_)
 		self.tboard_writer.add_scalars('aux.losses', losses_, step_)
 		self.tboard_writer.add_scalars('aux.weights', weights_, step_)
-# 		print("This is the current set of weights : \n")
-# 		print(weights_)
-# 		print("\n")
+
 		self.tboard_writer.add_scalars('aux.raw_weights', raw_weights_, step_)
 		self.tboard_writer.add_scalars('aux.lossxweights', prods_, step_)
 		self.tboard_writer.add_scalars('aux.gradnorms', norms_, step_)
+		token_probas = {k: np.mean(v[-self.grad_accum_factor:]) for k, v in self.token_probas.items()}
+		self.tboard_writer.add_scalars('aux.token_probas', token_probas, step_)
 
 	def push_metric_to_tensorboard(self, metric, step_, metric_name):
 		self.tboard_writer.add_scalars(metric_name, metric, step_)
 
 	# At the end of this, all the model gradients should be populated appropriately 
 	def get_grads_with_auxiliaries(self, aux_config_w_batch, searchOpts):
+		# Todo [Try to do a step through for this code to determine if things are working properly]
 		this_head = None
 		if not hasattr(self, 'body_params_end'):
 			this_head = getattr(self, "AuxHead-{}".format(self.primary_task_info['prim_task_id']), None)
@@ -584,112 +585,109 @@ class ModelWithAuxTasks(AutoModel):
 			self.body_params_end = get_body_end(this_head)
 		dev_id = "dev-{}".format(self.primary_task_info['prim_task_id'])
 		dev_head_grads = self.set_dev_head()[:self.body_params_end]
-		dev_norm = calc_norm(dev_head_grads)
+		dev_norm = calc_norm(dev_head_grads) + EPS # Adding this to prevent possible NAN here
+		dev_info = dev_head_grads, dev_norm
+		
+		# Get the task weighting parameters
+		all_aux_weights, prim_weight, aux_weight = searchOpts.get_weighttensor_nograd()
+		all_aux_weights_raw, prim_raw, aux_raw = searchOpts.get_weighttensor_nograd(softmax=False)
 
-		key_order = [self.primary_task_info['prim_task_id']]
-		key_order.extend(aux_config_w_batch.keys())
+		# Do stuff for the primary task
+		loss_config = self.primary_task_info['prim_task_id']
 		sent_dict, labels = self.get_classifier_samples(self.datasets['train'], self.batch_sz)
 		prim_batch = {'input':sent_dict , 'output':labels, 'rep_mask': None}
-		aux_config_w_batch.update({self.primary_task_info['prim_task_id']: prim_batch})
-		normed_weights = searchOpts.get_weighttensor_nograd()
-		raw_weights = searchOpts.get_weighttensor_nograd(softmax=False)
 
-		seen_aux = False
-		for aux_loss_config in key_order:
-			batch = aux_config_w_batch[aux_loss_config]
-			is_prim = not isinstance(aux_loss_config, tuple)
-			try:
-				# Currently we will execute this only once. Will need to clean this up to make it neater
-				self.run_one_auxconfig(
-										aux_loss_config, batch, (normed_weights, raw_weights),
-										searchOpts, dev_head_grads, dev_norm, is_prim=is_prim
-									)
-			except RuntimeError as e:
-				if 'out of memory' in str(e):
-					print('| WARNING: ran out of memory when running auxiliary config. Retrying')
-					torch.cuda.empty_cache()
-					gc.collect()
-					self.run_one_auxconfig(
-										aux_loss_config, batch, (normed_weights, raw_weights),
-										searchOpts, dev_head_grads, dev_norm, is_prim=is_prim
-									)
-				else:
-					raise e
+		prim_out, task_head = self.run_task(loss_config, prim_batch)
+		self.compute_task_weight_gradients(prim_out['loss'], task_head, dev_info, loss_config, searchOpts, is_prim=True)
+		weighted_loss = (prim_out['loss'] * prim_weight) / self.grad_accum_factor
+		weighted_loss.backward()
+		self.config_losses_and_weights[loss_config].append((prim_out['loss'].item(), prim_weight.item(), prim_raw.item()))
 
-	def run_one_auxconfig(
-			self, aux_loss_config, batch, weights, 
-			searchOpts, dev_head_grads, dev_norm, is_prim=False
-	):
-		normed_weights, raw_weights = weights
-		aux_weights, prim_weight = normed_weights
-		raw_aux_weights, raw_prim_weight = raw_weights
+		# Do stuff with the auxiliary tasks. We are assuming that batches with the same representation are grouped together
+		sum_of_aux_grads = [torch.zeros_like(x) for x in self.base_model.parameters()][:self.body_params_end]
+		aux_total_loss, num_aux, all_aux_pts = 0, 0, 0
+		for batch, config_dict in aux_config_w_batch:
+			for k, v in batch.items():
+				if isinstance(v, torch.Tensor):
+					batch[k] = v.cuda()
+			embedded_text = self.base_model(batch['input'], attention_mask=batch['rep_mask'])
 
-		human_readable = searchOpts.get_config_human_readable(aux_loss_config) if not is_prim else aux_loss_config
-		if not is_prim:
-			task_id = ".".join([str(x) for x in aux_loss_config]) if not self.share_output_heads else str(aux_loss_config[-1])
-		else:
-			task_id = aux_loss_config
+			# Now treat each of the losses in the config dictionary
+			for config_idx, (aux_loss_config, task_output) in enumerate(config_dict.items()):
+				human_readable = searchOpts.get_config_human_readable(aux_loss_config)
+				task_id = ".".join([str(x) for x in aux_loss_config]) if not self.share_output_heads else str(aux_loss_config[-1])
+				batch['output'] = task_output.cuda()
+				task_out, task_head = self.run_task(task_id, batch, embedded_text=embedded_text)
+
+				this_grads = self.compute_task_weight_gradients(task_out['loss'], task_head, dev_info, aux_loss_config, searchOpts, is_prim=False)
+				for idx, grad in enumerate(this_grads):
+					if grad is None:
+						continue
+					total_grad = len(task_out['loss_full'].nonzero()) * grad
+					sum_of_aux_grads[idx].add_(total_grad)
+					all_aux_pts += len(task_out['loss_full'].nonzero())
+					del grad
+				del this_grads
+
+				# Now back-prop
+				weighted_loss = (task_out['loss_full'].mean() * aux_weight) / self.grad_accum_factor
+				
+				is_not_last = config_idx != (len(config_dict) - 1)
+				weighted_loss.backward(retain_graph=is_not_last)
+				# Cache results for visualization
+				this_weight = all_aux_weights[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
+				raw_weight = all_aux_weights_raw[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
+				self.config_losses_and_weights[human_readable].append((task_out['loss'].item(), this_weight, raw_weight))
+				num_aux += 1
+				aux_total_loss += task_out['loss'].item()
+
+		aux_norm = calc_norm(sum_of_aux_grads) + EPS
+		cos_sim = dot_prod(dev_head_grads, sum_of_aux_grads)
+		cos_sim = (cos_sim / (dev_norm * aux_norm)) / self.grad_accum_factor
+		searchOpts.update_grad('auxiliary', -cos_sim)
+		self.weight_stats['auxiliary'].append((dev_norm.item(), (aux_norm.item() / all_aux_pts), cos_sim))
+		# Use 0.0 as the intermediate auxiliary loss. You can just look at the total
+		self.config_losses_and_weights['auxiliary'].append((aux_total_loss / num_aux, aux_weight.item(), aux_raw.item()))
+		probas = searchOpts.get_relative_probas(1, [0, 1, 2]) # Hacky - should fix
+		for k, v in zip(['None', 'Replace', 'Mask'], probas):
+			self.token_probas[k].append(v.item())
+
+
+	def run_task(self, task_id, batch, embedded_text=None):
 		this_head = getattr(self, "AuxHead-{}".format(task_id), None)
 		assert this_head is not None, 'Auxiliary Classifier {} not found'.format(task_id)
 		for k, v in batch.items():
 			if isinstance(v, torch.Tensor):
 				batch[k] = v.cuda()
 		input_, output_, rep_mask = batch['input'], batch['output'], batch['rep_mask']
-		model_out = this_head(input_, output_, attn_mask=rep_mask)
-		# Note - this is hacky but we want to do the bare minimum to see if we can alleviate the problem before moving on
-		if not is_prim:
-			tformed_masks = batch['tformed_masks']
-			og_order = ['None', 'Replace', 'Mask']
-			full_loss = (model_out['loss_full']).view(output_.shape)
-
-			joint_aux_grads = torch.autograd.grad(model_out['loss'], this_head.parameters(), allow_unused=True, retain_graph=True)[:self.body_params_end]
-			task_norm = calc_norm(joint_aux_grads) + EPS # adding here to prevent nans from appearing
-			joint_aux_weight = (1.0 - prim_weight)
-			for idx, key_val in enumerate(og_order):
-				this_mask = tformed_masks[key_val]
-				loss_ = full_loss[this_mask].mean()
-
-				gradients = torch.autograd.grad(loss_, this_head.parameters(), allow_unused=True, retain_graph=True)
-				this_grads = gradients[:self.body_params_end]
-				per_param_dp = []
-				cos_sim = dot_prod(dev_head_grads, this_grads, ppdp=per_param_dp)
-				cos_sim = (cos_sim / (dev_norm * task_norm))
-				this_loss_config = (aux_loss_config[0], idx, aux_loss_config[2], aux_loss_config[3])
-				human_readable =  searchOpts.get_config_human_readable(this_loss_config)
-				self.weight_stats[human_readable].append((dev_norm.item(), task_norm.item(), cos_sim))
-				cos_sim = cos_sim / self.grad_accum_factor
-				self.per_param_dp[human_readable].append(per_param_dp)
-				searchOpts.update_grad(this_loss_config, -cos_sim * joint_aux_weight)
-
-				this_weight = aux_weights[aux_loss_config[0], idx, aux_loss_config[2], aux_loss_config[3]].item()
-				raw_weight = raw_aux_weights[aux_loss_config[0], idx, aux_loss_config[2], aux_loss_config[3]].item()
-				self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight, raw_weight))
-				if math.isnan(this_weight):
-					print('Exiting because we encountered a NAN')
-					exit()
-
-			updated_loss = (model_out['loss'] * joint_aux_weight) / self.grad_accum_factor
-			self.config_losses_and_weights['Auxiliary'].append((model_out['loss'].item(), joint_aux_weight.item(), raw_aux_weights.view(-1).mean().item()))
-			updated_loss.backward()
+		if embedded_text:
+			model_out = this_head(input_, output_, embedded_text=embedded_text, attn_mask=rep_mask)
 		else:
-			loss_ = model_out['loss']
-			gradients = torch.autograd.grad(loss_, this_head.parameters(), allow_unused=True, retain_graph=True)
-			this_grads = gradients[:self.body_params_end]
-			task_norm = calc_norm(this_grads) + EPS
-			per_param_dp = []
-			cos_sim = dot_prod(dev_head_grads, this_grads, ppdp=per_param_dp)
-			cos_sim = (cos_sim / (dev_norm * task_norm)) 
-			self.weight_stats[human_readable].append((dev_norm.item(), task_norm.item(), cos_sim))
-			cos_sim = cos_sim / self.grad_accum_factor
-			self.per_param_dp[human_readable].append(per_param_dp)
-			searchOpts.update_grad(aux_loss_config, -cos_sim)
-			# Add this to the model gradients
-			this_weight = prim_weight.item()
-			raw_weight = raw_prim_weight.item()
+			model_out = this_head(input_, output_, attn_mask=rep_mask)
+		return model_out, this_head
 
-			weighted_loss = (loss_ * this_weight) / self.grad_accum_factor
-			weighted_loss.backward()
-			self.config_losses_and_weights[human_readable].append((loss_.item(), this_weight, raw_weight))
+	# Todo [ldery] - you can either normalize on a per-task basis or normalize across all tasks.
+	# You should test out both
+	def compute_task_weight_gradients(self, loss_, task_head, dev_info, loss_config, searchOpts, is_prim=False, sum_of_aux_grads=None):
+		task_desc = searchOpts.get_config_human_readable(loss_config) if not is_prim else loss_config
+
+		dev_head_grads, dev_norm = dev_info
+		gradients = torch.autograd.grad(loss_, task_head.parameters(), allow_unused=True, retain_graph=True)
+		this_grads = gradients[:self.body_params_end]
+		task_norm = calc_norm(this_grads) + EPS
+		per_param_dp = []
+
+		# Calcute and save the cosine similarity between tasks
+		cos_sim = dot_prod(dev_head_grads, this_grads, ppdp=per_param_dp)
+		cos_sim = (cos_sim / (dev_norm * task_norm)) 
+		self.weight_stats[task_desc].append((dev_norm.item(), task_norm.item(), cos_sim))
+
+		# Save the cosine similarity as the gradient
+		cos_sim = cos_sim / self.grad_accum_factor
+		self.per_param_dp[task_desc].append(per_param_dp)
+		searchOpts.update_grad(loss_config, -cos_sim)
+
+		return this_grads
 
 
 	# We train the primary head. This is further finetuning on top pre-training
