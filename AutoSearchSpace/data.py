@@ -255,7 +255,10 @@ class DataTransformAndItr(object):
 		rep_tforms = np.unique([config[2] for config in sample_configs])
 		rep_probas = searchOpts.get_relative_probas(2, rep_tforms)
 		for rep_idx, rep_id in enumerate(rep_tforms):
-			num_samples = math.ceil(self.train_batch_size * rep_probas[rep_idx].item())
+			try:
+				num_samples = math.ceil(self.train_batch_size * rep_probas[rep_idx].item())
+			except:
+				pdb.set_trace()
 
 			this_configs = [config for config in sample_configs if config[2] == rep_id]
 			datasets = np.unique([config[0] for config in this_configs])
@@ -269,9 +272,13 @@ class DataTransformAndItr(object):
 				token_tforms = np.unique([config[1] for config in this_ds_configs])
 				probas = searchOpts.get_relative_probas(1, token_tforms)
 				_, stage_map = searchOpts.config.get_stage_w_name(1)
-				token_probas = {}
-				for idx, name in stage_map.items():
-					token_probas[name] = probas[idx].item()
+				token_probas = None
+				if not searchOpts.config.isBERTTransform():
+					token_probas = {}
+					for idx, name in stage_map.items():
+						if idx in token_tforms:
+							token_probas[name] = probas[list(token_tforms).index(idx)].item()
+
 				inputs, labels, masks_for_tformed = self.collate(examples, token_probas)
 				pad_mask = 1.0 - (inputs.eq(self.dataOpts.tokenizer.pad_token_id)).float()
 				rep_mask = representation_tform.get_rep_tform(inputs.shape, pad_mask, rep_id)

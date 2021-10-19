@@ -11,7 +11,7 @@ from searchspace_options import (
 )
 
 def add_config_args(parser):
-	parser.add_argument('-searchspace-config', type=str, default='basic', choices=['basic', 'vbasic', 'with-illegal', 'bert', 'full'])
+	parser.add_argument('-searchspace-config', type=str, default='basic', choices=['basic', 'vbasic', 'vbasic1', 'with-illegal', 'bert', 'full'])
 
 
 class Config(object):
@@ -36,6 +36,9 @@ class Config(object):
 		self.stage_map = list(self.config.keys())
 		self.total_configs = np.prod([len(v) for k, v in self.config.items()])
 		self.illegal_sets = get_illegal_sets(self.base_config)
+
+	def isBERTTransform(self):
+		return 'BERT' in list(self.config['T'].values())
 
 	def num_stages(self):
 		return len(self.config)

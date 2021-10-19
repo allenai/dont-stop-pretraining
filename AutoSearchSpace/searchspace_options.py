@@ -78,6 +78,8 @@ def get_config(name):
 		config = FULL
 	elif name == 'vbasic':
 		config = VBASIC
+	elif name == 'vbasic1':
+		config = VBASIC1
 	elif name == 'bert':
 		config = BERT
 	assert config is not None, 'Wrong Config name given : {}'.format(name)

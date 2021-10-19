@@ -137,7 +137,9 @@ class ModelWithLMHead(nn.Module):
 		loss = self._loss(logits.view(-1, logits.shape[-1]), labels.long().view(-1))
 		output_dict = {}
 		output_dict["loss_full"] = loss
-		output_dict["loss"] = (loss.sum() / len(loss.nonzero()))
+		num_active = len(loss.nonzero())
+		num_active = num_active if num_active > 0 else 1
+		output_dict["loss"] = (loss.sum() / num_active)
 		return output_dict
 
 class ModelWithAuxTasks(AutoModel):
@@ -648,9 +650,10 @@ class ModelWithAuxTasks(AutoModel):
 		self.weight_stats['auxiliary'].append((dev_norm.item(), (aux_norm.item() / all_aux_pts), cos_sim))
 		# Use 0.0 as the intermediate auxiliary loss. You can just look at the total
 		self.config_losses_and_weights['auxiliary'].append((aux_total_loss / num_aux, aux_weight.item(), aux_raw.item()))
-		probas = searchOpts.get_relative_probas(1, [0, 1, 2]) # Hacky - should fix
-		for k, v in zip(['None', 'Replace', 'Mask'], probas):
-			self.token_probas[k].append(v.item())
+		if not searchOpts.config.isBERTTransform():
+			probas = searchOpts.get_relative_probas(1, [0, 1, 2]) # Hacky - should fix
+			for k, v in zip(['None', 'Replace', 'Mask'], probas):
+				self.token_probas[k].append(v.item())
 
 
 	def run_task(self, task_id, batch, embedded_text=None):

@@ -3,6 +3,7 @@ import numpy as np
 import torch.nn.functional as F
 from config import Config
 from torch.optim import SGD, Adam
+import math
 
 def add_searchspace_args(parser):
 	parser.add_argument('-searchopt-lr', type=float, default=1e-4)
@@ -81,9 +82,10 @@ class SearchOptions(object):
 			if this_weights.numel() == 1:
 				this_weights = this_weights.unsqueeze(0)
 			values = np.array([this_weights[id_] for id_ in stage_members])
-			if stage_id == 1:
+			if stage_id == 1 and len(stage_members) > 1: # This is a hack [fix - ldery]
 				# We want to add ['None', 'Replace', 'Mask']
 				bias = np.array([0, 0, 2.0794]) * self.tau
+				bias = np.array([bias[id_] for id_ in stage_members])
 				values = (values + bias) / self.tau
 			probas = F.softmax(torch.tensor(list(values)), dim=-1)
 		return probas

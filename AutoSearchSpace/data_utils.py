@@ -36,30 +36,53 @@ def mask_tokens(inputs, tokenizer, proba, token_proba=None):
 	masked_indices = torch.bernoulli(probability_matrix).bool()
 	labels[~masked_indices] = -100	# We only compute loss on masked tokens
 
+	tk_prob_is_none = token_proba is None
 	tformed_mask_indices = {}
+	indices_replaced, indices_random = None, None
 	# x% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
-	mask_proba = 0.8 if token_proba is None else token_proba['Mask']
-	indices_replaced = torch.bernoulli(torch.full(labels.shape, mask_proba)).bool() & masked_indices
-	inputs[indices_replaced] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
-	
-	mask_output = labels.clone().detach()
-	mask_output[~indices_replaced] = -100
-	tformed_mask_indices['Mask'] = (indices_replaced, mask_output)
+	if tk_prob_is_none or 'Mask' in token_proba:
+		mask_proba = 0.8 if tk_prob_is_none else token_proba['Mask']
+		indices_replaced = torch.bernoulli(torch.full(labels.shape, mask_proba)).bool() & masked_indices
+		inputs[indices_replaced] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
+
+		mask_output = labels.clone().detach()
+		mask_output[~indices_replaced] = -100
+		tformed_mask_indices['Mask'] = (indices_replaced, mask_output)
 
 	# y% of the time, we replace masked input tokens with random word
-	replace_proba = 0.5 if token_proba is None else (token_proba['Replace'] / (token_proba['Replace'] + token_proba['None']))
-	indices_random = torch.bernoulli(torch.full(labels.shape, replace_proba)).bool() & masked_indices & ~indices_replaced
-	random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
-	inputs[indices_random] = random_words[indices_random]
+	if tk_prob_is_none or 'Replace' in token_proba:
+		if tk_prob_is_none:
+			replace_proba = 0.5
+		elif 'None' in token_proba:
+			replace_proba = (token_proba['Replace'] / (token_proba['Replace'] + token_proba['None']))
+		else:
+			replace_proba = token_proba['Replace']
 
-	replace_output = labels.clone().detach()
-	replace_output[~indices_random] = -100
-	tformed_mask_indices['Replace'] = (indices_random, replace_output)
+		indices_random = torch.bernoulli(torch.full(labels.shape, replace_proba)).bool() & masked_indices
+		if indices_replaced is not None:
+			indices_random = indices_random  & ~indices_replaced
+		random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
+		inputs[indices_random] = random_words[indices_random]
 
-	indices_none = masked_indices & ~(indices_replaced | indices_random)
-	none_output = labels.clone().detach()
-	none_output[~indices_none] = -100
-	tformed_mask_indices['None'] = (indices_none, none_output)
+		replace_output = labels.clone().detach()
+		replace_output[~indices_random] = -100
+		tformed_mask_indices['Replace'] = (indices_random, replace_output)
+
+	if tk_prob_is_none or 'None' in token_proba:
+
+		used = None
+		if (indices_replaced is not None) and (indices_random is not None):
+			used = ~(indices_replaced | indices_random)
+		elif indices_random is not None:
+			used = ~indices_random
+		elif indices_replaced is not None:
+			used = ~indices_replaced
+
+		indices_none = masked_indices & used if used is not None else masked_indices
+		none_output = labels.clone().detach()
+		none_output[~indices_none] = -100
+		tformed_mask_indices['None'] = (indices_none, none_output)
+	tformed_mask_indices['BERT'] = (masked_indices, labels)
 	return inputs, labels, tformed_mask_indices
 
 
