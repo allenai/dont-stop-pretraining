@@ -77,8 +77,10 @@ class SearchOptions(object):
 	def get_valid_configs(self):
 		return self.valid_configurations
 
-	def get_relative_probas(self, stage_id, stage_members):
-		stage_name, _ = self.config.get_stage_w_name(stage_id)
+	def get_relative_probas(self, stage_id, stage_members, w_names=False):
+		stage_name, stage_dict = self.config.get_stage_w_name(stage_id)
+		if stage_members is None:
+			stage_members = list(stage_dict.keys())
 		with torch.no_grad():
 			this_weights = (self.weights[stage_name]).squeeze()
 			if this_weights.numel() == 1:
@@ -90,7 +92,14 @@ class SearchOptions(object):
 				bias = np.array([bias[id_] for id_ in stage_members])
 				values = (values + bias) / self.tau
 			probas = F.softmax(torch.tensor(list(values)), dim=-1)
-		return probas
+		if not w_names:
+			return probas
+		else:
+			probas = probas.numpy().tolist()
+			proba_dict = {}
+			for k, v in stage_dict.items():
+				proba_dict[v] = probas[k]
+			return proba_dict
 
 	def get_config_human_readable(self, config):
 		name_ = ''

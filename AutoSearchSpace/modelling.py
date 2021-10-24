@@ -207,7 +207,7 @@ class ModelWithAuxTasks(AutoModel):
 		self.per_param_dp = defaultdict(list)
 		self.weight_stats = defaultdict(list)
 		self.config_losses_and_weights = defaultdict(list)
-		self.token_probas = defaultdict(list)
+		self.stage_probas = defaultdict(lambda : defaultdict(list))
 
 
 	def setup_datasets(self, dataset_split_dict, model_name, max_seq_len, label_vocab=None, lazy=False):
@@ -571,8 +571,10 @@ class ModelWithAuxTasks(AutoModel):
 		self.tboard_writer.add_scalars('aux.raw_weights', raw_weights_, step_)
 		self.tboard_writer.add_scalars('aux.lossxweights', prods_, step_)
 		self.tboard_writer.add_scalars('aux.gradnorms', norms_, step_)
-		token_probas = {k: np.mean(v[-self.grad_accum_factor:]) for k, v in self.token_probas.items()}
-		self.tboard_writer.add_scalars('aux.token_probas', token_probas, step_)
+		
+		for stage_, dict_ in self.stage_probas.items():
+			atom_probas = {k: np.mean(v[-self.grad_accum_factor:]) for k, v in dict_.items()}
+			self.tboard_writer.add_scalars('stages.{}'.format(stage_), atom_probas, step_)
 
 	def push_metric_to_tensorboard(self, metric, step_, metric_name):
 		self.tboard_writer.add_scalars(metric_name, metric, step_)
@@ -650,10 +652,10 @@ class ModelWithAuxTasks(AutoModel):
 		self.weight_stats['auxiliary'].append((dev_norm.item(), (aux_norm.item() / all_aux_pts), cos_sim))
 		# Use 0.0 as the intermediate auxiliary loss. You can just look at the total
 		self.config_losses_and_weights['auxiliary'].append((aux_total_loss / num_aux, aux_weight.item(), aux_raw.item()))
-		if not searchOpts.config.isBERTTransform():
-			probas = searchOpts.get_relative_probas(1, [0, 1, 2]) # Hacky - should fix
-			for k, v in zip(['None', 'Replace', 'Mask'], probas):
-				self.token_probas[k].append(v.item())
+		for stage in range(searchOpts.config.num_stages()):
+			relative_probas = searchOpts.get_relative_probas(stage, None, w_names=True)
+			for k, v in relative_probas.items():
+				self.stage_probas[stage][k].append(v)
 
 
 	def run_task(self, task_id, batch, embedded_text=None):
