@@ -176,7 +176,7 @@ def auto_auxiliary(args):
 
 	# Create the search options object
 	searchOpts = SearchOptions(
-									autoloss_config, args.searchopt_lr, use_EG=args.use_EG, step_every=args.step_meta_every,
+									autoloss_config, args.prim_aux_lr, args.auxiliaries_lr, use_EG=args.use_EG, step_every=args.step_meta_every,
 									use_factored_model=args.use_factored_model, is_cuda=True, token_temp=args.token_temp
 								)
 

@@ -6,7 +6,8 @@ from torch.optim import SGD, Adam
 import math
 
 def add_searchspace_args(parser):
-	parser.add_argument('-searchopt-lr', type=float, default=1e-4)
+	parser.add_argument('-prim-aux-lr', type=float, default=1e-4)
+	parser.add_argument('-auxiliaries-lr', type=float, default=1e-4)
 	parser.add_argument('-num-config-samples', type=int, default=16)
 	parser.add_argument('-use-factored-model', action='store_true')
 	parser.add_argument('-step-meta-every', type=int, default=1)
@@ -25,11 +26,12 @@ def create_tensor(shape, init=0.0, requires_grad=True, is_cuda=True):
 import pdb
 class SearchOptions(object):
 	def __init__(
-					self, config, weight_lr, use_EG= False, step_every=1,
+					self, config, prim_aux_lr, aux_lr, use_EG= False, step_every=1,
 					use_factored_model=True, is_cuda=True, token_temp=1.0
 				):
 		self.config = config  # Store in case
-		self.weight_lr = weight_lr
+		self.weight_lr = prim_aux_lr
+		self.aux_lr = aux_lr
 		self.weights = {}
 		self.step_every = step_every
 		self.step_counter = 0
@@ -167,15 +169,15 @@ class SearchOptions(object):
 		proxy_loss.backward()
 
 
-	def get_exp_update(self, weight, is_output=False, factor=None):
+	def get_exp_update(self, weight, lr, is_output=False, factor=None):
 		if factor is None:
 			num_params = self.weights['all'].numel()
 			factor = ((weight.numel() + int(is_output)) / num_params) / self.step_every
-		return weight * torch.exp(-self.weight_lr * weight.grad * factor)
+		return weight * torch.exp(-lr * weight.grad * factor)
 
-	def update_weight(self, weight):
+	def update_weight(self, weight, lr):
 		factor = 1.0 / self.step_every
-		new_weight = weight - (self.weight_lr * weight.grad * factor)
+		new_weight = weight - (lr * weight.grad * factor)
 		weight.copy_(new_weight)
 		weight.grad.zero_()
 
@@ -190,12 +192,12 @@ class SearchOptions(object):
 						continue
 					if weight.grad is None:
 						weight.grad = torch.zeros_like(weight)
-					self.update_weight(weight)
+					self.update_weight(weight, self.aux_lr)
 
 				# Perform updates on the primary weight
 				assert self.prim_weight.grad is not None, 'Prim Weight should have gradients'
-				self.update_weight(self.prim_weight)
-				self.update_weight(self.aux_weight)
+				self.update_weight(self.prim_weight, self.weight_lr)
+				self.update_weight(self.aux_weight, self.weight_lr)
 
 		self.clear_grads()
 
