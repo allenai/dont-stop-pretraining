@@ -21,7 +21,7 @@ def add_data_args(parser):
 
 # Todo [ldery] - will need to incorporate caching here
 class LineByLineRawTextDataset(Dataset):
-	def __init__(self, file_path, tokenizer, tf_or_idf_present, cap_present):
+	def __init__(self, file_path, tokenizer, tf_or_idf_present, cap_present, max_=10):
 		assert os.path.isfile(file_path)
 		logger.info("Creating Raw Line x Line Dataset %s", file_path)
 		
@@ -29,6 +29,7 @@ class LineByLineRawTextDataset(Dataset):
 		all_tokens = []
 		self.doc_lens = []
 		self.doc_names = []
+		self.max_ = max_
 
 		if cap_present:
 			all_caps = []
@@ -52,7 +53,7 @@ class LineByLineRawTextDataset(Dataset):
 			if cap_present:
 				all_caps.extend(caps)
 			if tf_or_idf_present:
-				self.doc_tfs[doc_id] = scale(freq_cntr, smoothfactor=1)
+				self.doc_tfs[doc_id] = scale(freq_cntr, max_=self.max_, smoothfactor=1)
 				doc_tfs.update(list(freq_cntr.keys()))
 
 		self.examples = all_lines
@@ -114,24 +115,15 @@ class LineByLineRawTextDataset(Dataset):
 		return self.doc_names[idx]
 
 	def _pad_specials(self, sent_, special_tok_mask):
-# 		if len(sent_) == len(special_tok_mask):
-# 			assert sum(special_tok_mask) > 0, 'Sentence and token mask same length but there are special tokens'
-# 			return torch.tensor(sent_)
-# 		if len(sent_) >= len(special_tok_mask):
-# 		assert len(sent_) < len(special_tok_mask), 'Sentence must have fewer tokens than the special tokens mask'
+		if len(sent_) == len(special_tok_mask):
+			assert sum(special_tok_mask) > 0, 'Sentence and token mask same length but there are special tokens'
+			return torch.tensor(sent_)
+
+		assert len(sent_) < len(special_tok_mask), 'Sentence must have fewer tokens than the special tokens mask'
 		mul_ = 1.0 if isinstance(sent_[0], float) else 1
 		new_sent_ = torch.full((len(special_tok_mask), ), OUT_PAD * mul_) # We only compute loss on masked tokens
-		j = 0
-		for idx_, tok in enumerate(special_tok_mask):
-			if tok == 1:  # We have a special token here
-				continue
-			new_sent_[idx_] = sent_[j]
-			j += 1
-# 		j_idx = j
-# 		if j != len(sent_):
-# 			import pdb
-# 			pdb.set_trace()
-# 		assert j == len(sent_), 'New sentence not correctly filled to completion'
+		for idx_, val_ in enumerate(sent_):
+			new_sent_[idx_ + 1] = val_ # plus 1 because we are skipping the bos token
 		return new_sent_
 
 	def getcaps(self, sent_idx, special_token_mask):
@@ -153,6 +145,7 @@ class DataOptions(object):
 	def __init__(self, args, tokenizer, data_dict, output_dict):
 		self.construct_dataset_map(args, data_dict, output_dict, tokenizer)
 		self.tokenizer = tokenizer
+		self.max_ = 10 # This is a magic number showing the max scale for TFIDF style losses
 
 	def construct_dataset_map(self, args, data_dict, output_dict, tokenizer):
 		self.id_to_dataset_dict = {}
@@ -196,6 +189,9 @@ class DataTransformAndItr(object):
 		self.output_dict = output_dict
 		self.proba = args.mlm_probability
 		self.block_size = args.block_size
+		self.special_token_list = dataoptions.tokenizer.all_special_ids
+		self.special_token_list.remove(dataoptions.tokenizer.mask_token_id)
+		self.special_token_list.remove(dataoptions.tokenizer.unk_token_id)
 
 	def total_iters(self):
 		return int(self.dataOpts.get_total_len() / self.train_batch_size)
@@ -205,7 +201,7 @@ class DataTransformAndItr(object):
 
 	def apply_out_tform(
 							self, output_type, ds, padded_sent, tformed_sent,
-							orig_samples, tokenID_samples, special_tok_mask
+							orig_samples
 						):
 		if output_type == 'DENOISE':
 			assert padded_sent.shape == tformed_sent.shape, 'Invalid Shapes. Input must have same shape as output'
@@ -216,8 +212,13 @@ class DataTransformAndItr(object):
 			assert padded_sent.shape == tfidf_sent.shape, 'Invalid Shapes. Input must have same shape as output'
 			return {'input': padded_sent, 'output': tfidf_sent}
 		elif output_type == 'TF':
-			tf_sent = [ds.gettfs(x['idx'], special_tok_mask[id_]) for id_, x in enumerate(orig_samples)]
-			tf_sent = pad_sequence(tf_sent, OUT_PAD)
+			special_tok_mask = sum([padded_sent == x for x in self.special_token_list])
+			special_tok_mask = (special_tok_mask > 0) * 1
+			tf_sent = []
+			for id_, x in enumerate(orig_samples):
+				this_tf_sent = ds.gettfs(x['idx'], special_tok_mask[id_])
+				tf_sent.append(this_tf_sent)
+			tf_sent = torch.stack(tf_sent).to(padded_sent.device)
 			assert padded_sent.shape == tf_sent.shape, 'Invalid Shapes. Input must have same shape as output'
 			return {'input': padded_sent, 'output': tf_sent}
 		elif output_type == 'CAP':
@@ -282,13 +283,14 @@ class DataTransformAndItr(object):
 				inputs, labels, masks_for_tformed = self.collate(examples, token_probas)
 				pad_mask = 1.0 - (inputs.eq(self.dataOpts.tokenizer.pad_token_id)).float()
 				rep_mask = representation_tform.get_rep_tform(inputs.shape, pad_mask, rep_id)
-				# Todo [once we implement TFID style loss - include self.apply_out_tform]
 				batch = {'input': inputs, 'output': None, 'rep_mask': rep_mask}
 				config_dict = {}
 				for config_ in this_ds_configs:
 					token_tform_name = stage_map[config_[1]]
 					task_output = masks_for_tformed[token_tform_name][1]
-					config_dict[config_] = task_output
+					out_type = searchOpts.config.get_name(3, config_[-1])
+					dict_ = self.apply_out_tform(out_type, ds, inputs, task_output, examples)
+					config_dict[config_] = dict_['output']
 				aggregated_data.append((batch, config_dict))
 			# Avoiding pre-mature optimization here by aggregating by representation
 		return aggregated_data
@@ -300,10 +302,8 @@ class DataTransformAndItr(object):
 								max_length=self.block_size, return_special_tokens_mask=True
 				)
 		all_egs = [torch.tensor(x) for x in out["input_ids"]]
-		special_tok_mask = out["special_tokens_mask"]
 		inputs = pad_sequence(all_egs, self.dataOpts.tokenizer.pad_token_id)
-
-		return  self.apply_in_tform(inputs, token_probas)
+		return self.apply_in_tform(inputs, token_probas)
 
 
 # Todo  [ldery] - run some tests to make sure code here is working

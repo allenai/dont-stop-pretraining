@@ -98,7 +98,7 @@ class BasicClassifierWithF1(Model):
 		if initializer is not None:
 			initializer(self)
 
-	def forward(self, tokens, label=None, attn_mask=None) -> Dict[str, torch.Tensor]:
+	def forward(self, tokens, label=None, embedded_text=None, attn_mask=None) -> Dict[str, torch.Tensor]:
 
 		"""
 		Parameters
@@ -121,8 +121,8 @@ class BasicClassifierWithF1(Model):
 		loss : torch.FloatTensor, optional
 				A scalar loss to be optimised.
 		"""
-
-		embedded_text = self._text_field_embedder(tokens, attention_mask=attn_mask)
+		if embedded_text is None:
+			embedded_text = self._text_field_embedder(tokens, attention_mask=attn_mask)
 		if isinstance(tokens, dict):
 			mask = get_text_field_mask(tokens).float()
 		else:
@@ -202,6 +202,7 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 			dropout: float = None,
 			num_labels: int = None,
 			label_namespace: str = "labels",
+			max_loss_scale=50,
 			initializer: InitializerApplicator = InitializerApplicator(),
 			regularizer: Optional[RegularizerApplicator] = None,
 	) -> None:
@@ -212,16 +213,18 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 		self._classification_layer = torch.nn.Linear(self._classifier_input_dim, self._num_labels)
 		if self._num_labels == 1: # We are performing regression
 			self._mae = MeanAbsoluteError()
-			self._loss = torch.nn.L1Loss(reduction='none')
+			self._loss = torch.nn.MSELoss(reduction='none')
 		self.is_classification_task = self._num_labels > 1
+		self.max_loss_scale = max_loss_scale
 		if initializer is not None:
 			initializer(self)
 
 	def forward(  # type: ignore
-				self, tokens, label=None, attn_mask=None
+				self, tokens, label=None, attn_mask=None, embedded_text=None
 		) -> Dict[str, torch.Tensor]:
 
-		embedded_text = self._text_field_embedder(tokens, attention_mask=attn_mask)
+		if embedded_text is None:
+			embedded_text = self._text_field_embedder(tokens, attention_mask=attn_mask)
 		if isinstance(tokens, dict):
 			mask = get_text_field_mask(tokens).float()
 		else:
@@ -245,10 +248,18 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 			# TODO[LDERY] need to check if we consider the padding appropriately here
 			logits, label = logits.view(-1), label.view(-1)
 			if not self.is_classification_task:
-				label_mask = 1.0 - (label < 0).float()
+				label_mask = (label >= 0).float()
 				label = label * label_mask
 				logits = logits * label_mask
 			loss = self._loss(logits, label)
+			if not self.is_classification_task:
+				scale_mask = (loss > self.max_loss_scale)*1.0
+				with torch.no_grad():
+					inv_ = 1.0 / ((scale_mask * loss) + (1.0 - scale_mask))
+					scale = (scale_mask * self.max_loss_scale) + (1.0 - scale_mask)
+					factor = (inv_ * scale).detach()
+				loss = loss * factor
+			# Todo - ldery - need to bound
 			output_dict["loss_full"] = loss
 			if not self.is_classification_task:
 				output_dict["loss"] = loss.sum() / (label_mask.float().sum())
@@ -259,8 +270,8 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 					metric = self._label_f1_metrics[self.vocab.get_token_from_index(index=i, namespace="labels")]
 					metric(probs, label)
 				self._accuracy(logits, label)
-			else: # We are performing a regression task
-				self._mae(logits.view(-1), label.view(-1))
+			else:
+				self._mae(logits[label >= 0].view(-1), label[label >= 0].view(-1))
 		return output_dict
 	
 	def get_metrics(self, reset: bool = False) -> Dict[str, float]:

@@ -31,10 +31,10 @@ VBASIC1['out-space'] = [*VBASIC1['out-token-space'], *VBASIC1['out-sent-space']]
 
 
 BASIC = {
-	'input-space' : ['Task', 'In-Domain'],
+	'input-space' : ['Task'],
 	'input-tform-space': ['None', 'Replace', 'Mask'],
 	'rep-tform-space' : ['None'],
-	'out-token-space' : ['DENOISE', 'TFIDF'],
+	'out-token-space' : ['DENOISE', 'TF'],
 	'out-sent-space': [],
 }
 BASIC['out-space'] = [*BASIC['out-token-space'], *BASIC['out-sent-space']]

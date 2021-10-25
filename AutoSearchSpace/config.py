@@ -54,6 +54,9 @@ class Config(object):
 		_, stage_ = self.get_stage_w_name(stage_idx)
 		return stage_
 
+	def get_name(self, stage_idx, atom_idx):
+		return self.config[self.stage_map[stage_idx]][atom_idx]
+
 	def is_illegal(self, tuple_):
 		assert len(tuple_) == 4, 'This assumes that there are only 4 stages. If not, please consider re-writing this function'
 		op_list = []
