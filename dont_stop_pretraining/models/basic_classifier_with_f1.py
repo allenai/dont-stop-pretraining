@@ -3,6 +3,7 @@ from typing import Dict, Optional
 from overrides import overrides
 import torch
 
+
 from allennlp.data import Vocabulary
 from allennlp.models.model import Model
 from allennlp.modules import Seq2SeqEncoder, Seq2VecEncoder, TextFieldEmbedder, FeedForward
@@ -10,6 +11,8 @@ from allennlp.nn import InitializerApplicator, RegularizerApplicator
 from allennlp.nn.util import get_text_field_mask
 from allennlp.training.metrics import CategoricalAccuracy, F1Measure, MeanAbsoluteError
 import pdb
+
+EPS = 1e-8
 
 @Model.register("basic_classifier_with_f1")
 class BasicClassifierWithF1(Model):
@@ -81,7 +84,7 @@ class BasicClassifierWithF1(Model):
 			self._dropout = None
 
 		self._label_namespace = label_namespace
-		if num_labels:
+		if num_labels is not None:
 			self._num_labels = num_labels
 		else:
 			self._num_labels = vocab.get_vocab_size(namespace=self._label_namespace)
@@ -242,7 +245,7 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 		if self.is_classification_task:
 			probs = torch.nn.functional.softmax(logits, dim=-1)
 			output_dict = {"logits": logits, "probs": probs}
-			labels = labels.long()
+			label = label.long()
 
 		if label is not None:
 			# TODO[LDERY] need to check if we consider the padding appropriately here
@@ -280,3 +283,88 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 		metric_dict = {}
 		metric_dict['mae'] = self._mae.get_metric(reset)
 		return metric_dict
+
+'''
+Code borrowed from :
+https://github.com/StephAO/olfmlm/blob/6be204cdb78cda71b3bf37dd5c0a186e990a55c1/model/new_models.py
+'''
+def batch_cos_sim(a, b):
+	with torch.no_grad():
+		norm_a = a.norm(dim=-1)[:, :, None] + EPS
+		norm_b = b.norm(dim=-1)[:, None] + EPS
+	a_norm = a / norm_a
+	b_norm = b / norm_b
+	return a_norm.matmul(b_norm.T)
+
+
+@Model.register("basic_sentence_classifier_with_f1")
+class BasicSentenceClassifier(BasicClassifierWithF1):
+	def __init__(
+			self,
+			text_field_embedder: TextFieldEmbedder,
+			seq2vec_encoder: Seq2VecEncoder,
+			sent_feedforward: FeedForward,
+			tok_feedforward: FeedForward,
+			input_dim: int = 768,
+			dropout: float = None,
+			initializer: InitializerApplicator = InitializerApplicator(),
+			regularizer: Optional[RegularizerApplicator] = None,
+	) -> None:
+
+		super().__init__(None, text_field_embedder, None, None, None, dropout, num_labels=0, label_namespace=None, initializer=initializer, regularizer=regularizer)
+		self.sent_feedforward = sent_feedforward
+		self.sent_layernorm = torch.nn.LayerNorm(input_dim)
+		self.tok_feedforward = tok_feedforward
+		self.tok_layernorm = torch.nn.LayerNorm(input_dim)
+
+		self._seq2vec_encoder = seq2vec_encoder
+		self._accuracy = CategoricalAccuracy()
+		self._loss = torch.nn.CrossEntropyLoss(reduction='none')
+		if initializer is not None:
+			initializer(self)
+
+	def forward(  # type: ignore
+				self, tokens, label=None, attn_mask=None, embedded_text=None
+		) -> Dict[str, torch.Tensor]:
+
+		if embedded_text is None:
+			embedded_text = self._text_field_embedder(tokens, attention_mask=attn_mask)
+		if isinstance(tokens, dict):
+			mask = get_text_field_mask(tokens).float()
+		else:
+			mask = None
+
+		pooled_text = embedded_text[1][-1]
+		pooled_text = self._seq2vec_encoder(pooled_text, mask=mask)
+		if self._dropout:
+			pooled_text = self._dropout(pooled_text)
+		pooled_text = self.sent_feedforward(pooled_text)
+		pooled_text = self.sent_layernorm(pooled_text)
+		if self._dropout:
+			tok_tformed = self._dropout(embedded_text[1][-1])
+		tok_tformed = self.tok_feedforward(tok_tformed)
+		tok_tformed = self.tok_layernorm(tok_tformed)
+		logits = batch_cos_sim(tok_tformed, pooled_text).squeeze()
+		n_batches = pooled_text.shape[0]
+		assert n_batches % 2 == 0, 'There has to be an even number of inputs here'
+
+		label_mask = (label < 0)
+		updated_labels = list(range(n_batches))
+		updated_labels = torch.tensor(updated_labels[(n_batches // 2):] + updated_labels[:(n_batches // 2)]).view(-1, 1)
+		updated_labels = updated_labels.to(label.device)
+		new_labels = torch.ones_like(label, device=label.device) * updated_labels
+		new_labels = new_labels.masked_fill(label_mask, label.min())
+
+		output_dict = {}
+		if label is not None:
+			logits = logits.view(-1, logits.shape[-1])
+			label = new_labels.long().view(-1)
+			loss = self._loss(logits, label)
+			output_dict["loss_full"] = loss
+			output_dict["loss"] = loss.sum() / (len(loss.nonzero()) + EPS)
+			self._accuracy(logits, label)
+		return output_dict
+	
+	def get_metrics(self, reset: bool = False) -> Dict[str, float]:
+		return super().get_metrics(reset)
+

@@ -104,9 +104,17 @@ class LineByLineRawTextDataset(Dataset):
 	def __getitem__(self, i):
 		return {'sample': self.examples[i], 'idx': i}
 
-	def get_samples(self, n_samples):
-		chosen_idxs = np.random.choice(len(self.examples), n_samples)
-		return [self[idx] for idx in chosen_idxs]
+	def get_samples(self, n_samples, is_sent_config=False):
+		total_samples = len(self.examples)
+		if is_sent_config:
+			n_samples = n_samples // 2
+			total_samples -= 1
+		chosen_idxs = np.random.choice(total_samples, n_samples)
+		all_chosen = [self[idx] for idx in chosen_idxs]
+		if is_sent_config:
+			second_half = [self[idx + 1] for idx in chosen_idxs]
+			all_chosen.extend(second_half)
+		return all_chosen
 
 	def getdocid(self, sent_idx):
 		idx = np.searchsorted(self.doc_lens, sent_idx, side="left")
@@ -233,8 +241,8 @@ class DataTransformAndItr(object):
 			# Todo[ldery] - implement
 			raise NotImplementedError('This output type [{}] has not been impemented yet'.format(output_type)) 
 		elif  output_type == 'FS':
-			# Todo[ldery] - implement
-			raise NotImplementedError('This output type [{}] has not been impemented yet'.format(output_type)) 
+			assert padded_sent.shape == tformed_sent.shape, 'Invalid Shapes. Input must have same shape as output'
+			return {'input': padded_sent, 'output': tformed_sent}
 		elif  output_type == 'ASP':
 			# Todo[ldery] - implement
 			raise NotImplementedError('This output type [{}] has not been impemented yet'.format(output_type)) 
@@ -267,9 +275,11 @@ class DataTransformAndItr(object):
 			for ds_idx, ds_id in enumerate(datasets):
 				n_ds_samples = math.ceil(num_samples * ds_probas[ds_idx].item())
 				ds = self.dataOpts.get_dataset(ds_idx)
-				examples = ds.get_samples(n_ds_samples)
 
 				this_ds_configs = [config for config in this_configs if config[0] == ds_id]
+				out_tforms = np.unique([config[-1] for config in this_ds_configs])
+				is_sent_config = np.any([searchOpts.config.is_dot_prod(x) for x in out_tforms])
+				examples = ds.get_samples(n_ds_samples, is_sent_config=is_sent_config)
 				token_tforms = np.unique([config[1] for config in this_ds_configs])
 				probas = searchOpts.get_relative_probas(1, token_tforms)
 				_, stage_map = searchOpts.config.get_stage_w_name(1)

@@ -40,17 +40,8 @@ class SearchOptions(object):
 		base_shape = [1 for _ in range(num_stages)]
 		all_dims = list(base_shape)
 		self.stage_order = []
-		prim_task_info = ['Task', 'None', 'None']
-		self.primary_task_rep = {}
 		for stage_id in range(num_stages):
 			stage_name, ids_ = self.config.get_stage_w_name(stage_id)
-			if stage_id != (num_stages - 1):
-				try: # Adding this because of the new 'BERT' Transform we have added
-					prim_idx = list(ids_.values()).index(prim_task_info[stage_id])
-					self.primary_task_rep[stage_name] = prim_idx
-				except:
-					assert stage_id == 1, 'Could not find {} in {}'.format(prim_task_info[stage_id], list(ids_.values()))
-				
 			# Add the primary task to the output
 			shape = list(base_shape)
 			shape[stage_id] = len(ids_)

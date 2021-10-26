@@ -39,6 +39,17 @@ BASIC = {
 }
 BASIC['out-space'] = [*BASIC['out-token-space'], *BASIC['out-sent-space']]
 
+
+SBASIC = {
+	'input-space' : ['In-Domain'],
+	'input-tform-space': ['None', 'Replace', 'Mask'],
+	'rep-tform-space' : ['None'],
+	'out-token-space' : ['DENOISE'],
+	'out-sent-space': ['FS'],
+}
+SBASIC['out-space'] = [*SBASIC['out-token-space'], *SBASIC['out-sent-space']]
+
+
 W_ILLEGAL = deepcopy(BASIC)
 W_ILLEGAL['rep-tform-space'].extend(['Left-To-Right'])
 W_ILLEGAL['out-sent-space'].extend(['NSP', 'QT'])
@@ -72,6 +83,8 @@ def get_config(name):
 	config = None
 	if name == 'basic':
 		config = BASIC
+	elif name == 'sbasic':
+		config = SBASIC
 	elif name == 'with-illegal':
 		config = W_ILLEGAL
 	elif name == 'full':

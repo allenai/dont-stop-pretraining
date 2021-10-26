@@ -23,7 +23,7 @@ import math
 PATH = os.path.join(os.getcwd(), "dont_stop_pretraining/")
 
 sys.path.insert(1, PATH)
-from models import BasicClassifierWithF1, BasicSequenceTagger
+from models import BasicClassifierWithF1, BasicSequenceTagger, BasicSentenceClassifier
 from modules.seq2vec_encoders.cls_pooler import CLSPooler
 from dataset.dataset_readers.text_classification_json_reader_with_sampling import TextClassificationJsonReaderWithSampling
 
@@ -279,8 +279,7 @@ class ModelWithAuxTasks(AutoModel):
 					this_model = ModelWithLMHead(self.base_model, self.model_name)
 					setattr(self, 'AuxHead-{}'.format(key_), this_model)
 			elif searchOpts.is_dot_prod(aux_loss_config[-1]):
-				# Todo [ldery] - need to implement this
-				raise NotImplementedError('Not yet implemented')
+				self.setup_sent_classifier(dropout, key_, embedding_dim, ff_multiplier)
 			elif searchOpts.is_sent_classf(aux_loss_config[-1]):
 				vocab = Vocabulary()
 				vocab.add_tokens_to_namespace(searchOpts.get_vocab(aux_loss_config[-1]))
@@ -297,6 +296,27 @@ class ModelWithAuxTasks(AutoModel):
 									activations=torch.nn.ReLU(), dropout=dropout
 								)
 		classifier = BasicSequenceTagger(vocab, text_field_embedder, feedforward, embedding_dim, num_labels=num_labels, dropout=dropout, initializer=None)
+		classifier.to(self.base_model.device)
+		setattr(self, 'AuxHead-{}'.format(task_idx), classifier)
+		return classifier
+
+	def setup_sent_classifier(self, dropout, task_idx, embedding_dim, ff_multiplier, num_layers=1):
+		text_field_embedder = self.base_model
+		hidden_dim = embedding_dim * ff_multiplier
+		sent_feedforward = FeedForward(
+									embedding_dim, num_layers, hidden_dims=hidden_dim,
+									activations=torch.nn.GELU(), dropout=dropout
+								)
+		tok_feedforward = FeedForward(
+							embedding_dim, num_layers, hidden_dims=hidden_dim,
+							activations=torch.nn.GELU(), dropout=dropout
+						)
+		seq2vec_encoder = CLSPooler(embedding_dim)
+		classifier = BasicSentenceClassifier(
+												text_field_embedder, seq2vec_encoder, sent_feedforward,
+												tok_feedforward, embedding_dim, dropout=dropout,
+												initializer=None
+											)
 		classifier.to(self.base_model.device)
 		setattr(self, 'AuxHead-{}'.format(task_idx), classifier)
 		return classifier
