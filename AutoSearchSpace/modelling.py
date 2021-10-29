@@ -599,6 +599,15 @@ class ModelWithAuxTasks(AutoModel):
 	def push_metric_to_tensorboard(self, metric, step_, metric_name):
 		self.tboard_writer.add_scalars(metric_name, metric, step_)
 
+	def apply_gradients(self, gradients, task_params, scaling=1.0):
+		for g, p in zip(gradients, task_params):
+			if g is None:
+				continue
+			with torch.no_grad():
+				if p.grad is None:
+					p.grad = torch.zeros_like(p)
+				p.grad.add_(g * scaling)
+
 	# At the end of this, all the model gradients should be populated appropriately 
 	def get_grads_with_auxiliaries(self, aux_config_w_batch, searchOpts):
 		# Todo [Try to do a step through for this code to determine if things are working properly]
@@ -622,9 +631,10 @@ class ModelWithAuxTasks(AutoModel):
 		prim_batch = {'input':sent_dict , 'output':labels, 'rep_mask': None}
 
 		prim_out, task_head = self.run_task(loss_config, prim_batch)
-		self.compute_task_weight_gradients(prim_out['loss'], task_head, dev_info, loss_config, searchOpts, is_prim=True)
-		weighted_loss = (prim_out['loss'] * prim_weight) / self.grad_accum_factor
-		weighted_loss.backward()
+		prim_grads = self.compute_task_weight_gradients(prim_out['loss'], task_head, dev_info, loss_config, searchOpts, is_prim=True)
+		# Apply the calculated gradients
+		prim_scaling = prim_weight / self.grad_accum_factor
+		self.apply_gradients(prim_grads, task_head.parameters(), scaling=prim_scaling)
 		self.config_losses_and_weights[loss_config].append((prim_out['loss'].item(), prim_weight.item(), prim_raw.item()))
 
 		# Do stuff with the auxiliary tasks. We are assuming that batches with the same representation are grouped together
@@ -643,21 +653,28 @@ class ModelWithAuxTasks(AutoModel):
 				batch['output'] = task_output.cuda()
 				task_out, task_head = self.run_task(task_id, batch, embedded_text=embedded_text)
 
-				this_grads = self.compute_task_weight_gradients(task_out['loss'], task_head, dev_info, aux_loss_config, searchOpts, is_prim=False)
+				is_not_last = config_idx != (len(config_dict) - 1)
+				aux_grads = self.compute_task_weight_gradients(
+													task_out['loss'], task_head, dev_info, aux_loss_config,
+													searchOpts, is_prim=False, retain_graph=is_not_last
+							)
+				this_grads = aux_grads[:self.body_params_end]
+				num_active = len(task_out['loss_full'].nonzero())
+				all_aux_pts += num_active
 				for idx, grad in enumerate(this_grads):
 					if grad is None:
 						continue
-					total_grad = len(task_out['loss_full'].nonzero()) * grad
+					total_grad = num_active * grad
 					sum_of_aux_grads[idx].add_(total_grad)
-					all_aux_pts += len(task_out['loss_full'].nonzero())
 					del grad
 				del this_grads
 
 				# Now back-prop
-				weighted_loss = (task_out['loss_full'].mean() * aux_weight) / self.grad_accum_factor
-				
-				is_not_last = config_idx != (len(config_dict) - 1)
-				weighted_loss.backward(retain_graph=is_not_last)
+				with torch.no_grad():
+					aux_scaling = ((task_out['loss_full'].mean() / task_out['loss']) * (aux_weight / self.grad_accum_factor)).item()
+					aux_scaling = 0.0 if task_out['loss'] == 0 else aux_scaling
+				self.apply_gradients(aux_grads, task_head.parameters(), scaling=aux_scaling)
+
 				# Cache results for visualization
 				this_weight = all_aux_weights[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
 				raw_weight = all_aux_weights_raw[aux_loss_config[0], aux_loss_config[1], aux_loss_config[2], aux_loss_config[3]].item()
@@ -693,11 +710,11 @@ class ModelWithAuxTasks(AutoModel):
 
 	# Todo [ldery] - you can either normalize on a per-task basis or normalize across all tasks.
 	# You should test out both
-	def compute_task_weight_gradients(self, loss_, task_head, dev_info, loss_config, searchOpts, is_prim=False, sum_of_aux_grads=None):
+	def compute_task_weight_gradients(self, loss_, task_head, dev_info, loss_config, searchOpts, is_prim=False, retain_graph=True):
 		task_desc = searchOpts.get_config_human_readable(loss_config) if not is_prim else loss_config
 
 		dev_head_grads, dev_norm = dev_info
-		gradients = torch.autograd.grad(loss_, task_head.parameters(), allow_unused=True, retain_graph=True)
+		gradients = torch.autograd.grad(loss_, task_head.parameters(), allow_unused=True, retain_graph=retain_graph)
 		this_grads = gradients[:self.body_params_end]
 		task_norm = calc_norm(this_grads) + EPS
 		per_param_dp = []
@@ -712,7 +729,7 @@ class ModelWithAuxTasks(AutoModel):
 		self.per_param_dp[task_desc].append(per_param_dp)
 		searchOpts.update_grad(loss_config, -cos_sim)
 
-		return this_grads
+		return gradients
 
 
 	# We train the primary head. This is further finetuning on top pre-training
