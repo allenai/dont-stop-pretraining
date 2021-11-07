@@ -209,7 +209,6 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 			initializer: InitializerApplicator = InitializerApplicator(),
 			regularizer: Optional[RegularizerApplicator] = None,
 	) -> None:
-
 		super().__init__(vocab, text_field_embedder, None, feedforward_layer, None, dropout, num_labels, label_namespace, initializer, regularizer)
 
 		self._classifier_input_dim =  input_dim
@@ -243,17 +242,19 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 
 		output_dict = {}
 		if self.is_classification_task:
-			probs = torch.nn.functional.softmax(logits, dim=-1)
+			probs = torch.nn.functional.softmax(logits, dim=-1).view(-1, logits.shape[-1])
 			output_dict = {"logits": logits, "probs": probs}
 			label = label.long()
 
 		if label is not None:
 			# TODO[LDERY] need to check if we consider the padding appropriately here
-			logits, label = logits.view(-1), label.view(-1)
 			if not self.is_classification_task:
+				logits, label = logits.view(-1), label.view(-1)
 				label_mask = (label >= 0).float()
 				label = label * label_mask
 				logits = logits * label_mask
+			else:
+				logits, label = logits.view(-1, logits.shape[-1]), label.view(-1)
 			loss = self._loss(logits, label)
 			if not self.is_classification_task:
 				scale_mask = (loss > self.max_loss_scale)*1.0
@@ -269,9 +270,9 @@ class BasicSequenceTagger(BasicClassifierWithF1):
 			else:
 				output_dict["loss"] = loss.mean()
 			if self.is_classification_task:
-				for i in range(self._num_labels):
-					metric = self._label_f1_metrics[self.vocab.get_token_from_index(index=i, namespace="labels")]
-					metric(probs, label)
+# 				for i in range(self._num_labels):
+# 					metric = self._label_f1_metrics[self.vocab.get_token_from_index(index=i, namespace="labels")]
+# 					metric(probs, label)
 				self._accuracy(logits, label)
 			else:
 				self._mae(logits[label >= 0].view(-1), label[label >= 0].view(-1))

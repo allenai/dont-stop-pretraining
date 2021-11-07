@@ -53,13 +53,20 @@ class LineByLineRawTextDataset(Dataset):
 			if cap_present:
 				all_caps.extend(caps)
 			if tf_or_idf_present:
-				self.doc_tfs[doc_id] = scale(freq_cntr, max_=self.max_, smoothfactor=1)
+				tf_info = scale(freq_cntr, max_=self.max_, smoothfactor=1)
+				keys, values = list(tf_info.keys()), np.ceil(np.log10(list(tf_info.values())))
+				# get the minimum value
+				to_add = min(values) * np.sign(min(values)) + 1
+				values = values + to_add
+				tf_info = defaultdict(int)
+				for k, v in zip(keys, values):
+					tf_info[k] = v if v < 3 else 3  # This is currently hard-coded to ensure that we have 7 classes. Need to fix
+				self.doc_tfs[doc_id] = tf_info
 				doc_tfs.update(list(freq_cntr.keys()))
 
 		self.examples = all_lines
 		self.tokens = all_tokens
 		self.doc_lens = np.cumsum(self.doc_lens)
-
 		if tf_or_idf_present:
 			# need to do some idf computation here
 			smoothed_n = 1 + len(docs)
@@ -267,7 +274,7 @@ class DataTransformAndItr(object):
 			try:
 				num_samples = math.ceil(self.train_batch_size * rep_probas[rep_idx].item())
 			except:
-				pdb.set_trace()
+				assert False, 'There has been an issue calculating num_samples. Probably because repre_proba has NaN in it'
 
 			this_configs = [config for config in sample_configs if config[2] == rep_id]
 			datasets = np.unique([config[0] for config in this_configs])

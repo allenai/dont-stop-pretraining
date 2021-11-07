@@ -273,7 +273,7 @@ class ModelWithAuxTasks(AutoModel):
 				vocab_tokens, is_lm = searchOpts.is_tokenlevel_lm(aux_loss_config[-1])
 				if not is_lm:
 					vocab = Vocabulary()
-					vocab.add_tokens_to_namespace(vocab_tokens)
+					vocab.add_tokens_to_namespace(vocab_tokens, namespace='labels')
 					self.setup_seq_tagger(dropout, key_, vocab, embedding_dim, ff_multiplier, num_layers=1, num_labels=len(vocab_tokens))
 				else:
 					this_model = ModelWithLMHead(self.base_model, self.model_name)

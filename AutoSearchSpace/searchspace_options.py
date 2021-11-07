@@ -69,7 +69,7 @@ ALL_TOKEN_OUTPUTS =  ['DENOISE', 'TFIDF', 'TF', 'CAP']
 ALL_TOKEN_CLASSF = {
 	'CAP': 2,
 	'TFIDF': 1,
-	'TF': 1
+	'TF': 4,
 }
 ALL_SENT_CLASSF_OUTPUTS = {
 	'NSP' : 2,
