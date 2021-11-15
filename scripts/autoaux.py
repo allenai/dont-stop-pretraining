@@ -33,6 +33,7 @@ import re
 import shutil
 from typing import Dict, List, Tuple
 import pdb
+import gc
 
 import numpy as np
 import torch
@@ -328,7 +329,17 @@ def auto_auxiliary(args):
 			aggregate_data = dtform_and_itr.get_data(sample_configs, searchOpts, representation_tform)
 
 			# This does an automatic filling of the gradients. Accumulates the gradients
-			wrapper_model.get_grads_with_auxiliaries(aggregate_data, searchOpts)
+			try:
+				wrapper_model.get_grads_with_auxiliaries(aggregate_data, searchOpts)
+			except Exception as e:
+				print(' | Experienced a runtime error')
+				torch.cuda.empty_cache()
+				gc.collect()
+				if 'out of memory' in str(e):
+					print('| WARNING: ran out of memory, Skipping this step')
+				else:
+					print('| Warning: new error experienced - this is REALLY BAD : ', e)
+
 			if (iter_ + 1) % args.gradient_accumulation_steps == 0:
 				# We have accumulated enough gradient and can now do a step
 				torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
@@ -420,8 +431,10 @@ def final_finetuning(auxTaskModel, args):
 	test_metrics = auxTaskModel.evaluate_classifier(set_='test')
 	dev_metrics = auxTaskModel.evaluate_classifier(set_='dev')
 	print('Before Training. Dev  (F1={:.3f}, Accuracy={:.3f})'.format(dev_metrics['f1'], dev_metrics['accuracy']))
-	print('Before Training. Test (F1={:.3f}, Accuracy={:.3f})'.format(test_metrics['f1'], test_metrics['accuracy']))
+	print('Before Training. Test ( F1 = {:.3f} , Accuracy = {:.3f} )'.format(test_metrics['f1'], test_metrics['accuracy']))
 	no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight", "layer_norm.weight"]
+	pre_ft = test_metrics
+	post_ft = {'f1': None, 'accuracy': None}
 	for i in range(args.n_runs_classf):
 		torch.cuda.empty_cache()
 		args.seed = i
@@ -457,11 +470,13 @@ def final_finetuning(auxTaskModel, args):
 		pickle.dump(perfs, open(os.path.join(args.output_dir, 'ftmodel.{}.perf.pkl'.format(i)), 'wb') )
 		all_f1s.append(best_f1)
 		all_accs.append(best_acc)
+		post_ft['f1'] = best_f1
+		post_ft['accuracy'] = best_acc
 
 	all_accs, all_f1s = np.array(all_accs), np.array(all_f1s)
 	print("Test F1 - {:3f} +/ {:.3f}".format(all_f1s.mean(), all_f1s.std()))
 	print("Test Ac - {:3f} +/ {:.3f}".format(all_accs.mean(), all_accs.std()))
-	pickle.dump([all_accs, all_f1s], open(os.path.join(args.output_dir, 'ftmodel_{}.bestperfs.pkl'.format(args.seed)), 'wb'))
+	pickle.dump([pre_ft, post_ft], open(os.path.join(args.output_dir, 'ftmodel.bestperfs.pkl'), 'wb'))
 
 
 def main():

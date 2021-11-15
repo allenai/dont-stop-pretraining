@@ -11,9 +11,9 @@ BERT['out-space'] = [*BERT['out-token-space'], *BERT['out-sent-space']]
 
 
 VBASIC = {
-	'input-space' : ['Task'],
+	'input-space' : ['Task', 'In-Domain'],
 	'input-tform-space': ['None', 'Replace', 'Mask'],
-	'rep-tform-space' : ['None'],
+	'rep-tform-space' : ['None', 'Left-To-Right', 'Right-To-Left', 'Random-Factorized'],
 	'out-token-space' : ['DENOISE'],
 	'out-sent-space': [],
 }
